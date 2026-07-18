@@ -1,0 +1,32 @@
+name: conservative
+description: >
+  Patient detection for slow-moving population drift (e.g. credit risk, demand
+  forecasting). Long evaluation windows, strict significance thresholds, and a
+  signal must persist across several consecutive windows before it escalates.
+  Prioritizes avoiding alert fatigue over catching the earliest possible signal.
+
+evaluation:
+  window: "1d"
+  min_window_size: 500
+
+drift_tests:
+  continuous:
+    methods: [psi, ks]
+    psi_threshold: 0.25
+    ks_alpha: 0.01
+  categorical:
+    methods: [chi_square]
+    chi_square_alpha: 0.01
+  prediction_score:
+    method: jsd
+    jsd_threshold: 0.15
+
+multiple_comparison_correction:
+  method: benjamini_hochberg
+  fdr_alpha: 0.01
+
+alerting:
+  persistence_windows: 5
+  severity_thresholds:
+    warning: 2
+    critical: 4

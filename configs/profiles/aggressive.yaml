@@ -1,0 +1,31 @@
+name: aggressive
+description: >
+  Fast detection for adversarial or rapidly-shifting inputs (e.g. fraud, real-time
+  bidding). Short evaluation windows, loose significance thresholds, and immediate
+  escalation. Tolerates false positives in exchange for catching real drift quickly.
+
+evaluation:
+  window: "1h"
+  min_window_size: 50
+
+drift_tests:
+  continuous:
+    methods: [psi, ks]
+    psi_threshold: 0.1
+    ks_alpha: 0.10
+  categorical:
+    methods: [chi_square]
+    chi_square_alpha: 0.10
+  prediction_score:
+    method: jsd
+    jsd_threshold: 0.05
+
+multiple_comparison_correction:
+  method: benjamini_hochberg
+  fdr_alpha: 0.10
+
+alerting:
+  persistence_windows: 1
+  severity_thresholds:
+    warning: 1
+    critical: 2
