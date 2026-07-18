@@ -35,12 +35,22 @@ managed with [uv](https://docs.astral.sh/uv/).
 
 ## Status
 
-**Phase 1 (this commit): repo skeleton.** A FastAPI app with a single
-`/health` endpoint, the config-loading layer (Pydantic v2 schema + loader for
-per-profile YAML), two shipped detection profiles (`aggressive` /
-`conservative` — see below), Docker Compose wiring for Postgres + API +
-dashboard, and CI running ruff/mypy/pytest. No data model, ingestion, drift
-detection, or alerting yet — those land in later phases.
+**Phase 1: repo skeleton.** A FastAPI app with a single `/health` endpoint,
+the config-loading layer (Pydantic v2 schema + loader for per-profile YAML),
+two shipped detection profiles (`aggressive` / `conservative` — see below),
+Docker Compose wiring for Postgres + API + dashboard, and CI running
+ruff/mypy/pytest.
+
+**Phase 2 (this commit): data model and migrations.** SQLAlchemy models and
+an Alembic migration for the full storage layer — `models`, `baselines` +
+`baseline_records` (the reference sample a live window is compared against),
+`predictions` and `labels` as separate append-only tables keyed on a
+caller-supplied `prediction_id`, `evaluation_windows` (records which
+baseline version and config hash it was evaluated against, so a drift
+timeline stays interpretable across a retrain), `drift_results`, and
+`performance_results` (append-only, since a label backfill can retroactively
+revise a window's metrics). No ingestion API, drift computation, or
+alerting yet — those land in later phases.
 
 ## Detection profiles
 
@@ -65,9 +75,16 @@ fixed rule of thumb.
 
 ## Running locally
 
+The test suite includes migration/schema tests that need a real Postgres
+reachable at `DATABASE_URL` (defaults to
+`postgresql+psycopg://driftwatch:driftwatch@localhost:5432/driftwatch`).
+Bring one up with `docker compose up postgres` (or point `DATABASE_URL` at
+any Postgres 16 instance with a `driftwatch` database).
+
 ```bash
 uv sync
 uv run pytest
+uv run alembic upgrade head
 uv run uvicorn driftwatch.api.main:app --reload
 ```
 
