@@ -23,6 +23,35 @@ def test_register_baseline_creates_model_and_baseline(
     assert baseline.is_active is True
 
 
+def test_register_baseline_freezes_real_bin_edges(client: TestClient, db_session: Session) -> None:
+    records = [
+        {
+            "features": {"age": age, "region": region, "income": age * 1000},
+            "prediction_score": age / 100,
+        }
+        for age, region in [(20, "EU"), (30, "US"), (40, "EU"), (50, "APAC"), (60, "US")]
+    ]
+
+    response = client.post("/models/example-model/baseline", json={"records": records})
+
+    assert response.status_code == 201
+    baseline = db_session.get(Baseline, response.json()["baseline_id"])
+    assert baseline is not None
+
+    age_bins = baseline.binning_config["features"]["age"]
+    assert age_bins["type"] == "continuous"
+    assert age_bins["edges"][0] == 20.0
+    assert age_bins["edges"][-1] == 60.0
+
+    region_bins = baseline.binning_config["features"]["region"]
+    assert region_bins["type"] == "categorical"
+    assert region_bins["categories"] == ["APAC", "EU", "US"]
+
+    score_bins = baseline.binning_config["prediction_score"]
+    assert score_bins["edges"][0] == 0.2
+    assert score_bins["edges"][-1] == 0.6
+
+
 def test_register_baseline_unknown_model_returns_404(client: TestClient) -> None:
     response = client.post("/models/does-not-exist/baseline", json={"records": [VALID_RECORD]})
 

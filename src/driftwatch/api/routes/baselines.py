@@ -9,6 +9,7 @@ from driftwatch.api.deps import get_db
 from driftwatch.api.validation import extract_segment_values, validate_features
 from driftwatch.config.loader import ModelConfigNotFoundError, load_model_config
 from driftwatch.db.models import Baseline, BaselineRecord, Model
+from driftwatch.stats.binning import compute_baseline_binning
 
 router = APIRouter()
 
@@ -61,7 +62,12 @@ def register_baseline(
         )
     )
 
-    baseline = Baseline(model_id=model_id, is_active=True, binning_config={})
+    binning_config = compute_baseline_binning(
+        features=[record.features for record in body.records],
+        prediction_scores=[record.prediction_score for record in body.records],
+        schema=config.schema_,
+    )
+    baseline = Baseline(model_id=model_id, is_active=True, binning_config=binning_config)
     db.add(baseline)
     db.flush()
 

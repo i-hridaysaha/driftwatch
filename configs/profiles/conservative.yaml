@@ -1,7 +1,7 @@
 name: conservative
 description: >
   Patient detection for slow-moving population drift (e.g. credit risk, demand
-  forecasting). Long evaluation windows, strict significance thresholds, and a
+  forecasting). Long evaluation windows, larger effect-size thresholds, and a
   signal must persist across several consecutive windows before it escalates.
   Prioritizes avoiding alert fatigue over catching the earliest possible signal.
 
@@ -12,11 +12,14 @@ evaluation:
 drift_tests:
   continuous:
     methods: [psi, ks]
-    psi_threshold: 0.25
-    ks_alpha: 0.01
+    psi_threshold: 0.25  # PSI convention: >0.25 is "significant" shift
+    # A large window (500+ rows) makes even fairly separated CDFs easy to
+    # detect, so the threshold has to demand real, unambiguous separation
+    # rather than the modest shift the aggressive profile accepts.
+    ks_statistic_threshold: 0.3
   categorical:
     methods: [chi_square]
-    chi_square_alpha: 0.01
+    cramers_v_threshold: 0.3  # Cohen's (1988) "medium" effect for df=1
   prediction_score:
     method: jsd
     jsd_threshold: 0.15

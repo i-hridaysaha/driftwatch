@@ -1,7 +1,7 @@
 name: aggressive
 description: >
   Fast detection for adversarial or rapidly-shifting inputs (e.g. fraud, real-time
-  bidding). Short evaluation windows, loose significance thresholds, and immediate
+  bidding). Short evaluation windows, small effect-size thresholds, and immediate
   escalation. Tolerates false positives in exchange for catching real drift quickly.
 
 evaluation:
@@ -11,11 +11,15 @@ evaluation:
 drift_tests:
   continuous:
     methods: [psi, ks]
-    psi_threshold: 0.1
-    ks_alpha: 0.10
+    psi_threshold: 0.1  # PSI convention: >0.1 is "moderate" shift
+    # KS D-statistic is unitless, [0,1]. 0.15 catches a modest-but-real shift
+    # -- big enough that it's not just sampling noise even at this profile's
+    # small (50-row) minimum window, without needing near-total separation
+    # between the two empirical CDFs.
+    ks_statistic_threshold: 0.15
   categorical:
     methods: [chi_square]
-    chi_square_alpha: 0.10
+    cramers_v_threshold: 0.1  # Cohen's (1988) "small" effect for df=1
   prediction_score:
     method: jsd
     jsd_threshold: 0.05

@@ -13,14 +13,28 @@ class EvaluationConfig(StrictModel):
 
 
 class ContinuousDriftConfig(StrictModel):
+    """Alert thresholds here are effect sizes, not significance levels. At
+    production window sizes the p-value from a KS test collapses toward zero
+    regardless of whether the shift is operationally meaningful, so alerting
+    is gated on the KS D-statistic itself (bounded [0, 1]) -- the p-value is
+    still computed and reported, but never drives the decision. See
+    driftwatch.stats.ks for the full reasoning.
+    """
+
     methods: list[Literal["psi", "ks"]]
     psi_threshold: float = Field(gt=0)
-    ks_alpha: float = Field(gt=0, lt=1)
+    ks_statistic_threshold: float = Field(gt=0, lt=1)
 
 
 class CategoricalDriftConfig(StrictModel):
+    """Same effect-size-over-significance principle as ContinuousDriftConfig,
+    applied to the categorical case: alerting is gated on Cramer's V (bounded
+    [0, 1]), not the chi-square p-value, which has the identical collapse-to-
+    zero problem at scale as KS's p-value. See driftwatch.stats.chi_square.
+    """
+
     methods: list[Literal["chi_square"]]
-    chi_square_alpha: float = Field(gt=0, lt=1)
+    cramers_v_threshold: float = Field(gt=0, lt=1)
 
 
 class PredictionScoreDriftConfig(StrictModel):
