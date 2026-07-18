@@ -90,6 +90,7 @@ class Prediction(Base):
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    payload_hash: Mapped[str] = mapped_column(String, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("model_id", "prediction_id", name="uq_predictions_model_prediction"),
@@ -104,8 +105,9 @@ class Label(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     prediction_id: Mapped[str] = mapped_column(String, nullable=False)
     model_id: Mapped[str] = mapped_column(ForeignKey("models.model_id"), nullable=False)
-    label_value: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    label_value: Mapped[Any] = mapped_column(JSONB, nullable=False)
     labeled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String, nullable=False)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -168,6 +170,11 @@ class DriftResult(Base):
     )
 
 
+class MetricStatus(enum.StrEnum):
+    COMPUTED = "computed"
+    NOT_COMPUTABLE = "not_computable"
+
+
 class PerformanceResult(Base):
     __tablename__ = "performance_results"
 
@@ -178,7 +185,11 @@ class PerformanceResult(Base):
     segment_dimension: Mapped[str | None] = mapped_column(String, nullable=True)
     segment_value: Mapped[str | None] = mapped_column(String, nullable=True)
     metric_name: Mapped[str] = mapped_column(String, nullable=False)
-    metric_value: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[MetricStatus] = mapped_column(
+        Enum(MetricStatus, name="metric_status"), nullable=False
+    )
+    metric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    not_computable_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     n_labeled: Mapped[int] = mapped_column(Integer, nullable=False)
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

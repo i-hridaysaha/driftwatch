@@ -30,8 +30,8 @@ so far.
 ## Stack
 
 Python 3.11+, FastAPI, PostgreSQL, SQLAlchemy + Alembic, Pydantic v2,
-APScheduler, Streamlit, Docker Compose, pytest, ruff, mypy. Dependencies are
-managed with [uv](https://docs.astral.sh/uv/).
+APScheduler, Streamlit, scikit-learn, Docker Compose, pytest, ruff, mypy.
+Dependencies are managed with [uv](https://docs.astral.sh/uv/).
 
 ## Status
 
@@ -41,15 +41,37 @@ two shipped detection profiles (`aggressive` / `conservative` — see below),
 Docker Compose wiring for Postgres + API + dashboard, and CI running
 ruff/mypy/pytest.
 
-**Phase 2 (this commit): data model and migrations.** SQLAlchemy models and
-an Alembic migration for the full storage layer — `models`, `baselines` +
+**Phase 2: data model and migrations.** SQLAlchemy models and an Alembic
+migration for the full storage layer — `models`, `baselines` +
 `baseline_records` (the reference sample a live window is compared against),
 `predictions` and `labels` as separate append-only tables keyed on a
 caller-supplied `prediction_id`, `evaluation_windows` (records which
 baseline version and config hash it was evaluated against, so a drift
 timeline stays interpretable across a retrain), `drift_results`, and
 `performance_results` (append-only, since a label backfill can retroactively
-revise a window's metrics). No ingestion API, drift computation, or
+revise a window's metrics).
+
+**Phase 3 (this commit): ingestion API.** Three endpoints: baseline
+registration, prediction ingestion, and label backfill — all under
+`/models/{model_id}/...`, all batched. Predictions are immutable: a
+resent `prediction_id` with an identical payload is a no-op, a resent
+`prediction_id` with a *different* payload is a 409. Labels are
+corrections, not immutable events: a different payload under an existing
+`prediction_id` is accepted as a new label row, not a conflict. A label
+batch collects every evaluation window it touches and recomputes each
+exactly once via a standalone `recompute_performance_for_window`
+function — the same function the scheduler (phase 5) will call. Adds
+`ModelConfig` (per-model YAML: feature schema, segments, which profile to
+use) and a name-keyed metrics registry (`pr_auc`, `precision_at_threshold`,
+`recall_at_threshold`, `precision_at_k`, `roc_auc`, `rmse`, `mae`) — which
+metrics run for a given model is declared entirely in that model's profile
+YAML, not branched on in code. Every `performance_results` row carries a
+`status` (`computed` / `not_computable`, with a reason) — a metric that's
+mathematically undefined for a window (e.g. `roc_auc` when every label
+received so far is the same class) is recorded as a visible gap with a
+cause, not silently dropped; a missing row would render as a chart gap
+that reads as "no problem," when a degenerate window is itself a signal
+worth surfacing. No drift computation, scheduler, or
 alerting yet — those land in later phases.
 
 ## Detection profiles

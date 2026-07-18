@@ -40,6 +40,7 @@ def test_prediction_id_unique_per_model(db_session: Session) -> None:
             predicted_at=datetime.now(UTC),
             features={},
             prediction_value={},
+            payload_hash="hash",
         )
 
     db_session.add(make_prediction())
@@ -60,6 +61,7 @@ def test_label_rejects_unknown_prediction(db_session: Session) -> None:
             model_id="m2",
             label_value={"outcome": 1},
             labeled_at=datetime.now(UTC),
+            payload_hash="hash",
         )
     )
     with pytest.raises(IntegrityError):

@@ -29,3 +29,19 @@ alerting:
   severity_thresholds:
     warning: 1
     critical: 2
+
+# Binary classification under class imbalance (e.g. fraud): accuracy and ROC-AUC
+# are misleading here, so PR-AUC and threshold/budget-scoped precision/recall are
+# the headline metrics. ROC-AUC is kept only as a secondary reference point.
+performance_metrics:
+  - name: pr_auc
+  - name: precision_at_threshold
+    params:
+      threshold: 0.5
+  - name: recall_at_threshold
+    params:
+      threshold: 0.5
+  - name: precision_at_k
+    params:
+      n: 100
+  - name: roc_auc

@@ -55,6 +55,11 @@ class AlertingConfig(StrictModel):
     severity_thresholds: SeverityThresholds
 
 
+class MetricSpec(StrictModel):
+    name: str
+    params: dict[str, float | int | str] = Field(default_factory=dict)
+
+
 class Profile(StrictModel):
     name: str
     description: str
@@ -62,3 +67,39 @@ class Profile(StrictModel):
     drift_tests: DriftTestsConfig
     multiple_comparison_correction: MultipleComparisonCorrectionConfig
     alerting: AlertingConfig
+    performance_metrics: list[MetricSpec]
+
+
+class FeatureSpec(StrictModel):
+    name: str
+    dtype: Literal["continuous", "categorical"]
+    nullable: bool
+
+
+class PredictionFieldSpec(StrictModel):
+    dtype: Literal["continuous", "categorical"]
+
+
+class LabelFieldSpec(StrictModel):
+    dtype: Literal["continuous", "categorical"]
+
+
+class ModelSchemaSpec(StrictModel):
+    features: list[FeatureSpec]
+    prediction: PredictionFieldSpec
+    label: LabelFieldSpec
+
+
+class SegmentsSpec(StrictModel):
+    dimensions: list[str] = Field(default_factory=list)
+    min_segment_size: int = Field(gt=0, default=1)
+
+
+class ModelConfig(StrictModel):
+    model_config = {"extra": "forbid", "populate_by_name": True, "protected_namespaces": ()}
+
+    model_id: str
+    profile: str
+    prediction_type: Literal["regression", "binary_classification", "multiclass_classification"]
+    schema_: ModelSchemaSpec = Field(alias="schema")
+    segments: SegmentsSpec = Field(default_factory=SegmentsSpec)

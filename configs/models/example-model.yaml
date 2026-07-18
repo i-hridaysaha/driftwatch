@@ -1,0 +1,23 @@
+model_id: example-model
+profile: aggressive
+prediction_type: binary_classification
+
+schema:
+  features:
+    - name: age
+      dtype: continuous
+      nullable: false
+    - name: region
+      dtype: categorical
+      nullable: false
+    - name: income
+      dtype: continuous
+      nullable: true
+  prediction:
+    dtype: continuous
+  label:
+    dtype: categorical
+
+segments:
+  dimensions: [region]
+  min_segment_size: 30

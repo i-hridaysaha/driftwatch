@@ -18,6 +18,7 @@ dependencies = [
     "scipy>=1.14",
     "numpy>=2.0",
     "pandas>=2.2",
+    "scikit-learn>=1.9.0",
 ]
 
 [dependency-groups]
@@ -45,6 +46,7 @@ extend-exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "N"]
+ignore = ["B008"]  # FastAPI's Depends()-as-default is the documented idiom
 
 [tool.mypy]
 python_version = "3.11"
@@ -54,7 +56,7 @@ strict = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["apscheduler.*"]
+module = ["apscheduler.*", "sklearn.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

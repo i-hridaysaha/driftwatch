@@ -30,3 +30,8 @@ alerting:
   severity_thresholds:
     warning: 2
     critical: 4
+
+# Regression (e.g. demand forecasting): plain error magnitude metrics.
+performance_metrics:
+  - name: rmse
+  - name: mae
