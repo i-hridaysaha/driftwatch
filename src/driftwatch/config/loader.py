@@ -3,6 +3,7 @@ from functools import lru_cache
 import yaml
 
 from driftwatch.config.schema import ModelConfig, Profile
+from driftwatch.hashing import compute_payload_hash
 from driftwatch.metrics.registry import available_metrics
 from driftwatch.settings import get_settings
 
@@ -40,3 +41,18 @@ def load_model_config(model_id: str) -> ModelConfig:
     config = ModelConfig.model_validate(raw)
     load_profile(config.profile)
     return config
+
+
+def compute_config_hash(model_config: ModelConfig, profile: Profile) -> str:
+    """Fingerprints everything about a model's config that could change how a
+    window is evaluated (feature schema, segments, which profile, and that
+    profile's full content) into one hash, stored on every EvaluationWindow.
+    Lets a later reader tell whether a window's config has since changed --
+    e.g. before deciding whether to trust an old window's drift verdict when
+    comparing it against today's."""
+    return compute_payload_hash(
+        {
+            "model_config": model_config.model_dump(by_alias=True),
+            "profile": profile.model_dump(),
+        }
+    )

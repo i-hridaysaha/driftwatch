@@ -21,6 +21,9 @@ dependencies = [
     "scikit-learn>=1.9.0",
 ]
 
+[project.scripts]
+driftwatch = "driftwatch.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",

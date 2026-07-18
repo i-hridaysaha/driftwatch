@@ -8,6 +8,13 @@ description: >
 evaluation:
   window: "1d"
   min_window_size: 500
+  # A full day's batch pipelines commonly finish their last upstream job
+  # within an hour of midnight; waiting that long before finalizing
+  # yesterday's window's DRIFT stats catches the ordinary tail of
+  # daily-batch lag without materially delaying "patient" detection that
+  # already tolerates day-scale latency. Performance is unaffected by this
+  # -- it keeps revising as labels backfill regardless.
+  watermark: "1h"
 
 drift_tests:
   continuous:

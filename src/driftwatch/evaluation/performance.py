@@ -69,9 +69,31 @@ def recompute_performance_for_window(
         rows: list[LabeledPrediction],
         segment_dimension: str | None,
         segment_value: str | None,
+        min_size: int,
     ) -> None:
-        if segment_dimension is not None and len(rows) < model_config.segments.min_segment_size:
+        if len(rows) < min_size:
+            scope = (
+                f"segment {segment_dimension}={segment_value!r}" if segment_dimension else "window"
+            )
+            reason = (
+                f"{scope} has {len(rows)} labeled predictions, "
+                f"below configured minimum of {min_size}"
+            )
+            for spec in profile.performance_metrics:
+                result = PerformanceResult(
+                    evaluation_window_id=window.id,
+                    segment_dimension=segment_dimension,
+                    segment_value=segment_value,
+                    metric_name=spec.name,
+                    status=MetricStatus.NOT_COMPUTABLE,
+                    not_computable_reason=reason,
+                    n_labeled=len(rows),
+                    is_retroactive=is_retroactive,
+                )
+                session.add(result)
+                results.append(result)
             return
+
         y_true = [float(label.label_value) for _, label in rows]
         y_pred = [float(prediction.prediction_score) for prediction, _ in rows]  # type: ignore[arg-type]
         for spec in profile.performance_metrics:
@@ -102,8 +124,7 @@ def recompute_performance_for_window(
             session.add(result)
             results.append(result)
 
-    if labeled_predictions:
-        compute_and_store(labeled_predictions, None, None)
+    compute_and_store(labeled_predictions, None, None, profile.evaluation.min_window_size)
 
     for dimension in model_config.segments.dimensions:
         segment_values = {
@@ -117,9 +138,13 @@ def recompute_performance_for_window(
                 for prediction, label in labeled_predictions
                 if prediction.segment_values.get(dimension) == segment_value
             ]
-            compute_and_store(rows, dimension, str(segment_value))
+            compute_and_store(
+                rows, dimension, str(segment_value), model_config.segments.min_segment_size
+            )
 
     window.performance_computed_at = datetime.now(UTC)
     window.n_labels = len(labeled_predictions)
+    if labeled_predictions:
+        window.label_watermark = max(label.received_at for _, label in labeled_predictions)
 
     return results

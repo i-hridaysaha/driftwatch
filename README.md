@@ -94,7 +94,16 @@ also records `effective_bins`, the actual post-deduplication bin count,
 since skewed or low-cardinality data can collapse most of the requested 10
 quantile bins into far fewer. See "Statistical methods" below for the
 epsilon, effect-size, and multiple-comparison-scope decisions this phase
-made explicit. No scheduler or alerting yet — those land in later phases.
+made explicit.
+
+**Phase 5 (this commit): scheduler and evaluation pipeline.** A single
+`evaluate_window()` function that both the scheduler and a new CLI backfill
+command call — computing drift for every feature (global and per-segment)
+and then performance for whatever labels have arrived, idempotently. See
+"Evaluation pipeline" below for the event-time-vs-ingestion-time, the
+drift-final-vs-performance-revisable lifecycle split, and the
+idempotency-by-constraint decisions this phase made explicit. No alerting
+yet — that lands in phase 6.
 
 ## Statistical methods
 
@@ -156,6 +165,108 @@ made explicit. No scheduler or alerting yet — those land in later phases.
   .jsd_threshold` is written against — worth knowing if cross-referencing
   against scipy directly.
 
+## Evaluation pipeline
+
+- **Windows are keyed on event time (`predicted_at`), never ingestion time.**
+  A prediction ingested late still lands in the window it actually belongs
+  to. All window arithmetic is UTC, and boundaries are aligned to the Unix
+  epoch (not to whenever a model happened to be registered or a scheduler
+  tick happened to fire) — see `driftwatch.scheduler.windowing
+  .compute_window_boundaries`. The same `(range, window duration)` always
+  produces exactly the same boundaries, computed by a scheduler tick today
+  or a CLI backfill next year.
+- **A window has two separate lifecycles, not one.** This distinction is
+  load-bearing, not cosmetic — scenario 4 of the demo generator (phase 8:
+  concept drift that's only visible once labels backfill, with input
+  distributions staying stable throughout) depends on it:
+  - **Drift is computed once and is final.** From the predictions that exist
+    in the window at `window_end + evaluation.watermark`, never recomputed
+    for that window again.
+  - **Performance stays open indefinitely.** It's recomputed every time a
+    new label arrives for a prediction in that window — weeks or months
+    later, with no watermark or finality of its own — tracked via
+    `label_watermark` (below). `recompute_performance_for_window` is what
+    does this, called directly by the label ingestion endpoint, completely
+    independent of whether the window's drift has already run.
+
+  Nothing in this codebase uses the unqualified word "sealed" — every
+  occurrence says "drift watermark elapsed" or similar, specifically because
+  the whole window is never sealed, only drift is.
+- **Late-arriving predictions: drift watermark, not retroactive
+  re-evaluation.** A window's drift becomes eligible for its one-time
+  computation at `window_end + evaluation.watermark`
+  (`driftwatch.scheduler.windowing.is_drift_watermark_elapsed`). A
+  straggler prediction landing after that point is still stored — predictions
+  are never rejected — but is permanently excluded from that window's drift
+  stats, and increments `EvaluationWindow.late_prediction_count` with a
+  logged warning (see below), so a rising late-arrival rate is visible as
+  the data pipeline problem it is, not silently absorbed. This is a
+  deliberate choice, not an oversight: labels arriving weeks late is this
+  system's core premise (see "Delayed ground truth is first-class" above),
+  but a *prediction* arriving late relative to its own event time is a
+  pipeline hiccup, not a fundamental feature of the domain — and a
+  monitoring dashboard is better served by a drift chart that never
+  silently moves again once published than by one that's occasionally more
+  complete but can revise under the viewer.
+- **Late predictions are counted, not dropped silently.** Every prediction
+  ingested after its window's drift has already been evaluated increments
+  that window's `late_prediction_count` and logs a warning naming the
+  window and the prediction — see `driftwatch.api.routes.predictions`. This
+  is a data point about the ingestion pipeline's health, not just the
+  model's: a climbing rate means predictions are arriving later relative to
+  their own event time than the configured watermark assumes.
+- **Idempotency is enforced by the database, not application logic.** A
+  window is "claimed" by inserting its `EvaluationWindow` row inside a
+  SAVEPOINT; `uq_evaluation_windows_model_range` raises `IntegrityError` if
+  another process already claimed the same window concurrently, and that's
+  caught and treated as a no-op — safe even with two evaluation runs racing
+  on the same window, not just against a well-behaved caller. `DriftResult`
+  has its own functional unique index (`evaluation_window_id, feature_name,
+  test_method, COALESCE(segment_dimension, ''), COALESCE(segment_value,
+  '')`, since Postgres treats `NULL != NULL` in plain unique constraints) so
+  a re-run can never duplicate rows even if the claim step were somehow
+  bypassed. `PerformanceResult` deliberately has no such constraint — it's
+  designed to hold multiple rows per window as labels backfill over time —
+  so its idempotency instead comes from the scheduler only ever calling
+  `recompute_performance_for_window` once per window's *initial* evaluation;
+  every later call is a legitimate, intentional revision, not a duplicate.
+- **Every window records what it was evaluated against.** `baseline_id`
+  (which baseline version), `config_hash` (a fingerprint of the resolved
+  `ModelConfig` + `Profile` at evaluation time — see
+  `driftwatch.config.loader.compute_config_hash`), and `label_watermark`
+  (the latest label `received_at` incorporated into the most recent
+  performance computation). Together these mean a drift timeline stays
+  interpretable across a model retrain or a config change, and a dashboard
+  can tell whether more labels have arrived since a window's performance was
+  last computed without re-running anything.
+- **Minimum sample size, from config, gates drift and performance alike.**
+  Below `evaluation.min_window_size` (globally) or `segments
+  .min_segment_size` (per segment), every configured test/metric gets a
+  `not_computable` row with a reason instead of a number computed from too
+  few samples to mean anything — the same status/reason convention used
+  throughout, applied here to stop segment-level charts on tiny samples from
+  reading as confident signal when they're really just noise.
+- **The CLI evaluates historical ranges through the identical code path.**
+  `uv run driftwatch evaluate --model-id <id> --start <iso> --end <iso>
+  [--force]` calls the exact same `evaluate_window()` the scheduler calls —
+  the only difference is that a CLI backfill bypasses the watermark
+  entirely (an explicit historical range means "evaluate these windows now,"
+  not "whatever happens to be ready"). This is what lets the demo generator
+  (phase 8) seed 30+ windows of deterministic history in one shot, something
+  a scheduler that only ever asks "what window is 'now' in" cannot do.
+  `--force` deletes and re-evaluates windows that already exist in the given
+  range, for byte-identical demo-data regeneration.
+- **APScheduler misfire handling is explicit, not left at the library
+  default.** `misfire_grace_time=None` (a late tick always eventually runs,
+  never gets silently dropped past some deadline), `coalesce=True` (a
+  backlog of missed ticks collapses into one run, since each tick already
+  scans the full unevaluated backlog — see `find_drift_ready_unevaluated_windows`
+  — so running it N times back to back after an outage would just repeat
+  the same discovery query for nothing), `max_instances=1` (avoid two ticks
+  doing redundant concurrent work; correctness doesn't depend on this, since
+  `evaluate_window` is already safe under concurrent execution, it's purely
+  to not waste work). See `driftwatch.scheduler.run`.
+
 ## Detection profiles
 
 Two reusable YAML profiles ship in `configs/profiles/`, each a complete set
@@ -203,6 +314,13 @@ uv sync
 uv run pytest
 uv run alembic upgrade head
 uv run uvicorn driftwatch.api.main:app --reload
+
+# in another terminal: runs the scheduler as its own long-lived process
+uv run python -m driftwatch.scheduler.run
+
+# evaluate an arbitrary historical range (same code path as the scheduler)
+uv run driftwatch evaluate --model-id example-model \
+  --start 2026-01-01T00:00:00Z --end 2026-02-01T00:00:00Z
 ```
 
 ## Running with Docker Compose
@@ -211,5 +329,14 @@ uv run uvicorn driftwatch.api.main:app --reload
 docker compose up --build
 ```
 
-Brings up Postgres, the API (`localhost:8000`), and a dashboard stub
-(`localhost:8501`).
+Brings up Postgres, the API (`localhost:8000`), a `scheduler` service (same
+image as the API, running `driftwatch.scheduler.run` as its own process so
+scaling the API never runs multiple schedulers by accident), and a dashboard
+stub (`localhost:8501`). Docker isn't available on the machine this was
+built on, so this hasn't been run locally — but CI's
+`docker-compose-smoke-test` job runs `docker compose up --build` on every
+push and polls `/health` before tearing down, on a runner that does have
+Docker. That job only proves the images build and the API process starts
+and responds — `/health` has no DB dependency, so it doesn't exercise
+migrations or any DB-backed endpoint; that's a stated scope limit of the
+smoke test, not an oversight.

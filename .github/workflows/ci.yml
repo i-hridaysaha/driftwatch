@@ -45,3 +45,37 @@ jobs:
 
       - name: Test (pytest)
         run: uv run pytest
+
+  docker-compose-smoke-test:
+    # Verifies the stated deliverable "docker compose up brings the whole
+    # stack up" actually works, on a runner that has Docker (this project's
+    # own dev environment does not). This only proves the images build and
+    # the API process starts and responds -- /health is a pure liveness
+    # check with no DB dependency (see driftwatch.api.routes.health), so it
+    # does not exercise migrations or any DB-backed endpoint. That's a
+    # known, deliberate scope limit of this smoke test, not an oversight.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start the stack
+        run: docker compose up --build -d
+
+      - name: Wait for the API health endpoint
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health; then
+              echo "API is healthy"
+              exit 0
+            fi
+            echo "waiting for API to become healthy... ($i/30)"
+            sleep 2
+          done
+          echo "API did not become healthy within the timeout"
+          docker compose ps
+          docker compose logs
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

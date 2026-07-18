@@ -1,6 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from driftwatch.durations import parse_duration
 
 
 class StrictModel(BaseModel):
@@ -10,6 +12,22 @@ class StrictModel(BaseModel):
 class EvaluationConfig(StrictModel):
     window: str
     min_window_size: int = Field(gt=0)
+    watermark: str
+    """How long after window_end to wait before a window's DRIFT statistics
+    become eligible for their one-time, never-recomputed evaluation -- see
+    driftwatch.scheduler.windowing for the full reasoning on why drift is
+    computed once on a fixed delay rather than retroactively re-evaluated on
+    late-arriving predictions. Governs drift only: performance metrics for
+    the same window are a separate, indefinitely-revisable lifecycle driven
+    by label arrival, not by this watermark -- see
+    EvaluationWindow.label_watermark and
+    driftwatch.evaluation.performance.recompute_performance_for_window."""
+
+    @field_validator("window", "watermark")
+    @classmethod
+    def _must_be_parseable_duration(cls, value: str) -> str:
+        parse_duration(value)  # raises ValueError with a clear message if malformed
+        return value
 
 
 class ContinuousDriftConfig(StrictModel):

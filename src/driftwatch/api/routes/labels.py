@@ -7,10 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from driftwatch.api.deps import get_db
-from driftwatch.api.idempotency import compute_payload_hash
 from driftwatch.config.loader import ModelConfigNotFoundError, load_model_config
 from driftwatch.db.models import EvaluationWindow, Label, Model, Prediction
 from driftwatch.evaluation.performance import recompute_performance_for_window
+from driftwatch.hashing import compute_payload_hash
 
 router = APIRouter()
 

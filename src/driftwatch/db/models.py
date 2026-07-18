@@ -29,6 +29,11 @@ class TestMethod(enum.StrEnum):
     JSD = "jsd"
 
 
+class MetricStatus(enum.StrEnum):
+    COMPUTED = "computed"
+    NOT_COMPUTABLE = "not_computable"
+
+
 class Model(Base):
     __tablename__ = "models"
 
@@ -134,8 +139,16 @@ class EvaluationWindow(Base):
     performance_computed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    label_watermark: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     n_predictions: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     n_labels: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    late_prediction_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    """Predictions ingested after this window's drift was already evaluated,
+    whose predicted_at falls inside [window_start, window_end) anyway.
+    Permanently excluded from this window's drift stats (see
+    driftwatch.scheduler.windowing.is_drift_watermark_elapsed) -- tracked
+    here, and logged at ingestion time, so a rising rate is visible as a
+    data pipeline problem rather than silently absorbed."""
 
     __table_args__ = (
         UniqueConstraint(
@@ -157,22 +170,30 @@ class DriftResult(Base):
     test_method: Mapped[TestMethod] = mapped_column(
         Enum(TestMethod, name="test_method"), nullable=False
     )
-    statistic: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[MetricStatus] = mapped_column(
+        Enum(MetricStatus, name="metric_status"), nullable=False
+    )
+    statistic: Mapped[float | None] = mapped_column(Float, nullable=True)
     p_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     corrected_p_value: Mapped[float | None] = mapped_column(Float, nullable=True)
-    is_significant: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_significant: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    not_computable_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     n_baseline: Mapped[int] = mapped_column(Integer, nullable=False)
     n_live: Mapped[int] = mapped_column(Integer, nullable=False)
 
     __table_args__ = (
         Index("ix_drift_results_window", "evaluation_window_id"),
         Index("ix_drift_results_window_feature", "evaluation_window_id", "feature_name"),
+        Index(
+            "uq_drift_results_window_feature_segment_method",
+            "evaluation_window_id",
+            "feature_name",
+            "test_method",
+            text("COALESCE(segment_dimension, '')"),
+            text("COALESCE(segment_value, '')"),
+            unique=True,
+        ),
     )
-
-
-class MetricStatus(enum.StrEnum):
-    COMPUTED = "computed"
-    NOT_COMPUTABLE = "not_computable"
 
 
 class PerformanceResult(Base):

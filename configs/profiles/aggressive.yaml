@@ -7,6 +7,14 @@ description: >
 evaluation:
   window: "1h"
   min_window_size: 50
+  # Finalize a window's DRIFT stats 10 minutes after it ends, computed
+  # exactly once -- never again, even if a straggler prediction for that
+  # window shows up later (see late_prediction_count). Performance is
+  # unaffected: it keeps revising as labels backfill, with no watermark of
+  # its own. Short because "fast detection" is the whole point of this
+  # profile; 10 minutes is enough slack for normal ingestion lag without
+  # meaningfully delaying when a real shift gets caught.
+  watermark: "10m"
 
 drift_tests:
   continuous:

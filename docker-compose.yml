@@ -27,6 +27,21 @@ services:
       postgres:
         condition: service_healthy
 
+  scheduler:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    # Same image as api -- identical dependencies, different entrypoint. Runs
+    # as its own process/container rather than in-process with the API so
+    # that scaling the API to multiple replicas never runs multiple
+    # schedulers concurrently by accident.
+    command: ["uv", "run", "python", "-m", "driftwatch.scheduler.run"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://driftwatch:driftwatch@postgres:5432/driftwatch
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   dashboard:
     build:
       context: .

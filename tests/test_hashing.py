@@ -1,4 +1,4 @@
-from driftwatch.api.idempotency import compute_payload_hash
+from driftwatch.hashing import compute_payload_hash
 
 
 def test_identical_payloads_hash_the_same() -> None:
