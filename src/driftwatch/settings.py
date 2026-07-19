@@ -9,6 +9,10 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://driftwatch:driftwatch@localhost:5432/driftwatch"
     configs_dir: Path = Path("configs")
+    alert_webhook_url: str | None = None
+    """If set, alert notifications are also POSTed here as JSON (see
+    driftwatch.alerting.notifications.WebhookNotificationChannel), alongside
+    the always-on logging channel."""
 
 
 @lru_cache

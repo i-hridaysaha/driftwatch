@@ -5,6 +5,9 @@ from sqlalchemy.orm import Session
 
 from driftwatch.config.loader import compute_config_hash, load_model_config, load_profile
 from driftwatch.db.models import (
+    Alert,
+    AlertKind,
+    AlertStatus,
     Baseline,
     BaselineRecord,
     DriftResult,
@@ -264,3 +267,29 @@ def test_benjamini_hochberg_sets_corrected_p_value_only_where_applicable(
     assert ks_and_chi  # sanity: the profile does configure p-value-bearing tests
     assert all(r.corrected_p_value is not None for r in ks_and_chi)
     assert all(r.corrected_p_value is None for r in psi_and_jsd)
+
+
+def test_evaluate_window_opens_a_real_alert_end_to_end(db_session: Session) -> None:
+    """Not a direct call into the alert engine -- proves the actual wiring
+    through evaluate_window creates a real Alert row via the real
+    aggressive.yaml profile (fire_persistence_windows: 1)."""
+    _register_baseline(db_session)
+    window_start = datetime(2026, 1, 1, tzinfo=UTC)
+    window_end = window_start + timedelta(hours=1)
+    _add_predictions(db_session, window_start, 60, age_offset=500)  # guaranteed drift
+
+    window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
+    assert window is not None
+
+    alert = db_session.scalars(
+        select(Alert).where(
+            Alert.model_id == MODEL_ID,
+            Alert.kind == AlertKind.DRIFT,
+            Alert.feature_name == "age",
+            Alert.signal_name == "psi",
+        )
+    ).one()
+
+    assert alert.status == AlertStatus.OPEN
+    assert alert.evidence_window_id == window.id
+    assert alert.evidence_baseline_id == window.baseline_id

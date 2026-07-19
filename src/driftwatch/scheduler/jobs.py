@@ -4,8 +4,13 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from driftwatch.alerting.notifications import (
+    NotificationChannel,
+    default_channels,
+    notify_if_needed,
+)
 from driftwatch.config.loader import load_model_config, load_profile
-from driftwatch.db.models import EvaluationWindow, Model, Prediction
+from driftwatch.db.models import Alert, EvaluationWindow, Model, Prediction
 from driftwatch.durations import parse_duration
 from driftwatch.evaluation.drift import evaluate_window
 from driftwatch.scheduler.windowing import compute_window_boundaries, is_drift_watermark_elapsed
@@ -86,6 +91,7 @@ def evaluate_pending_windows(session: Session, as_of: datetime | None = None) ->
     this job and unaffected by whether a window's drift has already run."""
     as_of = as_of or datetime.now(UTC)
     model_ids = session.scalars(select(Model.model_id).where(Model.is_active.is_(True))).all()
+    channels = default_channels()
 
     evaluated_count = 0
     for model_id in model_ids:
@@ -109,6 +115,20 @@ def evaluate_pending_windows(session: Session, as_of: datetime | None = None) ->
                 continue
             if result is not None:
                 evaluated_count += 1
+                _notify_touched_alerts(session, result.id, channels)
             session.commit()
 
     return evaluated_count
+
+
+def _notify_touched_alerts(
+    session: Session, window_id: int, channels: list[NotificationChannel]
+) -> None:
+    """Alerts created or updated while evaluating this window -- both drift
+    and any performance alerts from the initial recompute triggered by
+    evaluate_window -- get a chance to notify. notify_if_needed is what
+    actually enforces the no-renotify-on-steady-state policy; this just
+    finds the candidates."""
+    touched = session.scalars(select(Alert).where(Alert.last_seen_window_id == window_id)).all()
+    for alert in touched:
+        notify_if_needed(alert, channels)

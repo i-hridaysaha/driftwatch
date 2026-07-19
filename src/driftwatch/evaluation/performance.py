@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from driftwatch.alerting.engine import evaluate_performance_alerts_for_window
 from driftwatch.config.loader import load_model_config, load_profile
 from driftwatch.db.models import (
     EvaluationWindow,
@@ -146,5 +147,8 @@ def recompute_performance_for_window(
     window.n_labels = len(labeled_predictions)
     if labeled_predictions:
         window.label_watermark = max(label.received_at for _, label in labeled_predictions)
+
+    session.flush()
+    evaluate_performance_alerts_for_window(session, window, profile)
 
     return results

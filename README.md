@@ -96,14 +96,20 @@ quantile bins into far fewer. See "Statistical methods" below for the
 epsilon, effect-size, and multiple-comparison-scope decisions this phase
 made explicit.
 
-**Phase 5 (this commit): scheduler and evaluation pipeline.** A single
-`evaluate_window()` function that both the scheduler and a new CLI backfill
-command call — computing drift for every feature (global and per-segment)
-and then performance for whatever labels have arrived, idempotently. See
-"Evaluation pipeline" below for the event-time-vs-ingestion-time, the
+**Phase 5: scheduler and evaluation pipeline.** A single `evaluate_window()`
+function that both the scheduler and a new CLI backfill command call —
+computing drift for every feature (global and per-segment) and then
+performance for whatever labels have arrived, idempotently. See "Evaluation
+pipeline" below for the event-time-vs-ingestion-time, the
 drift-final-vs-performance-revisable lifecycle split, and the
-idempotency-by-constraint decisions this phase made explicit. No alerting
-yet — that lands in phase 6.
+idempotency-by-constraint decisions this phase made explicit.
+
+**Phase 6 (this commit): alerting.** An alert is a stateful row (`open` ->
+`escalated` -> `resolved`), not an event per window — sustained drift across
+20 windows is one row with an updated `last_seen`, not 20. See "Alerting"
+below for the hysteresis, evidence-snapshot, not-computable-as-its-own-
+alert-type, retroactive-recompute, aggregation-cap, and notification-
+idempotency decisions this phase made explicit.
 
 ## Statistical methods
 
@@ -267,6 +273,134 @@ yet — that lands in phase 6.
   `evaluate_window` is already safe under concurrent execution, it's purely
   to not waste work). See `driftwatch.scheduler.run`.
 
+## Alerting
+
+- **An alert is a stateful row with a lifecycle, not an event per window.**
+  `Alert.status` moves through `open` -> `escalated` -> `resolved`. Its
+  identity is `(model_id, kind, signal_name, feature_name, segment_dimension,
+  segment_value)` — `kind` is `drift`, `performance`, or `not_computable`,
+  and `signal_name` is a test method (`psi`, `ks`, ...) or a metric name
+  (`pr_auc`, `rmse`, ...). Sustained drift across 20 consecutive windows
+  updates ONE row's `last_seen_window_id`/`last_seen_at`, never inserts a
+  second row — a partial unique index enforces at most one non-resolved,
+  non-aggregate row per identity (`uq_alerts_active_identity`, `COALESCE`-
+  based since Postgres treats `NULL != NULL`). A *resolved* alert doesn't
+  block a fresh row when the same signal fires again later — that's a new
+  episode, kept as its own row so the history isn't lost.
+- **No `PENDING` state, and no counter persisted before an alert exists.**
+  `driftwatch.alerting.engine` recomputes the relevant streak from scratch
+  every time, scanning bounded recent `DriftResult`/`PerformanceResult`
+  history for that exact signal (`driftwatch.alerting.streaks
+  .fetch_drift_history` / `fetch_performance_history`) and walking backward
+  from the most recent entry until the classification changes
+  (`current_streak`). An `Alert` row is only created once a signal actually
+  reaches `open`; there's nothing to maintain or clean up for a streak that
+  never gets that far. How far back that rescan looks is itself an explicit,
+  validated config value — `AlertingConfig.history_scan_windows` — not
+  derived from the persistence counts it has to satisfy: a scan bound that's
+  merely inferred as "the max of the persistence counts" is tautologically
+  always exactly enough, which can never catch a real misconfiguration.
+  Making it a separate field lets a config-load validator
+  (`_history_scan_covers_persistence_with_margin`) require it to exceed the
+  largest configured persistence count by a margin, and fail loudly at
+  startup if it doesn't — a profile where the rescan bound can't see far
+  enough back to satisfy its own escalate/resolve gate would otherwise leave
+  alerts silently, permanently unable to fire.
+- **Hysteresis via a three-way classifier, not the existing
+  `is_significant`.** `DriftResult.is_significant` (fire-threshold-only,
+  used for that row's own informational display) is left untouched.
+  Alerting reclassifies every window's statistic independently as
+  `breach` / `dead_zone` / `clear` using BOTH the fire and clear thresholds
+  (`*_clear_threshold` on each drift-test config, `clear_threshold` on a
+  `MetricSpec`). A `dead_zone` reading — between clear and fire — breaks
+  whichever streak was building, the same as a value on the opposite side
+  would; that's what stops a statistic hovering at the boundary from
+  flapping an alert open and resolved every window. Resolving requires
+  `resolve_persistence_windows` CONSECUTIVE clear windows, symmetric with
+  `fire_persistence_windows` for opening — any interruption (a breach or a
+  dead-zone reading) resets that count to zero, it doesn't just pause it.
+- **`not_computable` is never "no drift."** It's its own `AlertKind`, with
+  its own persistence gate (`not_computable_persistence_windows`) completely
+  independent of the drift/performance fire count. A feature that's been
+  uncomputable for that many consecutive windows raises a `not_computable`
+  alert alongside whatever `drift`-kind alert may or may not also exist for
+  the same signal — silence about a broken feature is exactly the failure
+  mode this service exists to prevent. Unlike drift/performance, a
+  `not_computable` alert resolves the instant the signal becomes computable
+  again, no clear-persistence needed: "did it compute" is a clean binary
+  signal with nothing to flap around, unlike a continuous statistic near a
+  threshold.
+- **Every alert freezes its evidence at the moment it opens — and again at
+  the moment it escalates.** `evidence_statistic`, `evidence_threshold`,
+  `evidence_baseline_id`, `evidence_config_hash`, and `evidence_window_id`
+  are set once, when a row transitions to `open`, and never touched again —
+  not even when the model's config changes later. `driftwatch.alerting
+  .test_engine.test_evidence_survives_config_change` proves this directly:
+  re-evaluating a later window under a changed profile leaves a prior
+  alert's evidence untouched, so it still explains why IT fired, under the
+  rules in effect then. Escalation gets its own second snapshot —
+  `escalation_evidence_statistic`/`_threshold`/`_baseline_id`/
+  `_config_hash`/`_window_id` — frozen once at the `open` -> `escalated`
+  transition, same discipline, same never-touched-again guarantee. An alert
+  that opened at a PSI of 0.11 and escalated at 0.42 can say both: the open
+  snapshot alone would only ever be able to explain why it first fired, not
+  why it got worse. See `test_escalation_evidence_is_a_separate_snapshot_
+  from_open_evidence`.
+- **Performance alerts and retroactive label backfill.** A window can
+  recompute its performance many times as labels trickle in (see "Evaluation
+  pipeline" above). `fetch_performance_history` deduplicates to the LATEST
+  `PerformanceResult` per window before the streak is ever computed, so ten
+  recomputes of one window contribute exactly one entry to the streak, not
+  ten — a window whose metrics degrade after labels arrive still alerts, but
+  never re-alerts purely because it recomputed again. The same `(model,
+  kind=performance, metric_name, segment)` identity from the point above is
+  what makes this safe: a degraded window updates the one open alert's
+  `last_seen`, it doesn't spawn another.
+- **Alert volume is capped per run, with the overflow counted, not hidden.**
+  If more new alerts would open in one evaluation run than
+  `AlertingConfig.max_alerts_per_run` (e.g. 50 segments breach at once), the
+  individual rows are rolled into one aggregate `Alert`
+  (`is_aggregate=True`, `aggregated_signal_count`, `aggregated_signals` —
+  the list of what got rolled up) instead of flooding the table and every
+  notification channel with N separate rows. The cap only throttles the
+  RATE of new opens in a single run; already-open individual alerts from
+  prior runs keep updating, escalating, and resolving normally regardless of
+  it. The aggregate itself resolves once a later run's new-open count drops
+  back to or under the cap. Known scope limit, stated rather than engineered
+  around: `not_computable` aggregation doesn't distinguish whether the
+  overflow came from drift tests or performance metrics, since both share
+  that one `AlertKind` — a simultaneous overflow from both in the same run
+  is rare enough not to warrant a further identity split.
+- **Notification delivery is pluggable, and idempotent by design.**
+  `driftwatch.alerting.notifications.NotificationChannel` is a two-method
+  interface (`notify(alert, event)`); `LoggingNotificationChannel` (always
+  on) and `WebhookNotificationChannel` (generic JSON POST, added if
+  `Settings.alert_webhook_url` is configured) are the two implementations —
+  deliberately not a Slack or email integration, which are thin adapters a
+  real deployment builds on top of a webhook receiver, not something this
+  service should special-case. Re-notification policy: `notify_if_needed`
+  compares the alert's current `status` against `last_notified_status` and
+  only dispatches on an actual TRANSITION (opened, escalated, resolved) —
+  never on steady-state continuation of an already-notified status. A still-
+  open alert does not re-notify on every scheduler tick just because its
+  `last_seen` advanced; calling `notify_if_needed` repeatedly with an
+  unchanged status is a no-op after the first call.
+- **A failing notification channel never fails the evaluation run it's
+  attached to.** A hanging or erroring webhook is an expected operational
+  condition, not a bug — `notify_if_needed` calls each channel in isolation,
+  catches any exception, logs it, and records it on the alert
+  (`last_notification_error`, `last_notification_error_at`) instead of
+  letting it propagate. `WebhookNotificationChannel` deliberately does not
+  catch its own errors anymore — the centralized catch in `notify_if_needed`
+  is what makes this true for every channel uniformly, not just the shipped
+  webhook one. There's no automatic retry: a failed delivery isn't
+  re-attempted on the next touch of an already-notified status, matching
+  the no-renotify-on-steady-state policy above; `last_notification_error`
+  is what an operator (or a log/metrics pipeline) watches instead.
+  `test_raising_channel_leaves_alert_transaction_committed` proves the part
+  that actually matters operationally: a raising channel still leaves the
+  alert's state transition committed, not rolled back.
+
 ## Detection profiles
 
 Two reusable YAML profiles ship in `configs/profiles/`, each a complete set
@@ -280,16 +414,27 @@ baseline registration exists) references one of these by name.
   KS D-statistic 0.15 (a modest but real shift, large enough not to be
   sampling noise even at this profile's small 50-row minimum window), and
   Cramer's V 0.1 (Cohen's 1988 "small" effect for one degree of freedom) —
-  and escalates after a single breaching window. Trades false positives for
-  the earliest possible signal.
+  and fires on a single breaching window
+  (`fire_persistence_windows: 1`), escalating after 3 more consecutive
+  breaches. Its hysteresis gap is narrow (PSI clears at 0.07, only 0.03
+  below the 0.1 fire line) since fast-moving inputs are expected to cross
+  back and forth quickly. Trades false positives for the earliest possible
+  signal.
 - **`conservative.yaml`** — for slow-moving population drift (e.g. credit
   risk, demand forecasting). Daily windows, larger effect-size thresholds —
   PSI 0.25 (the "significant shift" convention boundary), KS D-statistic 0.3
   (real, unambiguous separation — a large 500+ row window makes even modest
   shifts easy to detect, so the bar has to be higher than the aggressive
   profile's), and Cramer's V 0.3 (Cohen's "medium" effect) — and requires
-  the signal to persist across 5 consecutive windows before escalating.
-  Prioritizes avoiding alert fatigue over catching the earliest signal.
+  3 consecutive breaching windows to fire (`fire_persistence_windows: 3`)
+  and 8 to escalate. Its hysteresis gap is wide (PSI clears at 0.15, a full
+  0.1 below the 0.25 fire line) so a single noisy window drifting back
+  toward baseline doesn't reset a real, slow-building trend. Prioritizes
+  avoiding alert fatigue over catching the earliest signal.
+
+Persistence counts and hysteresis gap widths are not incidental — they're
+as deliberate a difference between the two profiles as the drift
+thresholds themselves; see "Alerting" above for how both are used.
 
 Note these thresholds are not the same numbers the old `ks_alpha`/
 `chi_square_alpha` significance levels used before this phase renamed them

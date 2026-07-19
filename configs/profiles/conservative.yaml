@@ -1,9 +1,11 @@
 name: conservative
 description: >
   Patient detection for slow-moving population drift (e.g. credit risk, demand
-  forecasting). Long evaluation windows, larger effect-size thresholds, and a
-  signal must persist across several consecutive windows before it escalates.
-  Prioritizes avoiding alert fatigue over catching the earliest possible signal.
+  forecasting). Long evaluation windows, larger effect-size thresholds, wide
+  hysteresis gaps, and high persistence counts on both firing and clearing.
+  Prioritizes avoiding alert fatigue over catching the earliest possible signal --
+  once open, an alert here means something real and stays open until the
+  evidence is unambiguous.
 
 evaluation:
   window: "1d"
@@ -20,28 +22,50 @@ drift_tests:
   continuous:
     methods: [psi, ks]
     psi_threshold: 0.25  # PSI convention: >0.25 is "significant" shift
+    psi_clear_threshold: 0.15  # wide gap (40%): avoids re-firing on a partial reversion
     # A large window (500+ rows) makes even fairly separated CDFs easy to
     # detect, so the threshold has to demand real, unambiguous separation
     # rather than the modest shift the aggressive profile accepts.
     ks_statistic_threshold: 0.3
+    ks_statistic_clear_threshold: 0.15  # wide gap (50%)
   categorical:
     methods: [chi_square]
     cramers_v_threshold: 0.3  # Cohen's (1988) "medium" effect for df=1
+    cramers_v_clear_threshold: 0.15  # wide gap (50%)
   prediction_score:
     method: jsd
     jsd_threshold: 0.15
+    jsd_clear_threshold: 0.08  # wide gap (~47%)
 
 multiple_comparison_correction:
   method: benjamini_hochberg
   fdr_alpha: 0.01
 
 alerting:
-  persistence_windows: 5
-  severity_thresholds:
-    warning: 2
-    critical: 4
+  # Requires 3 consecutive breaching windows (3 days, at this profile's daily
+  # window) before opening at all -- a single bad day is noise, not a signal.
+  # Escalates only after 8 consecutive days still breaching: by then it is
+  # unambiguously a real, sustained shift, not a blip. Resolves only after 5
+  # consecutive clear days -- deliberately slower to clear than to fire,
+  # matching the wide hysteresis gaps above: this profile would rather stay
+  # open a few extra days on a fading signal than flap closed and reopen on
+  # a partial, temporary reversion.
+  fire_persistence_windows: 3
+  escalate_persistence_windows: 8
+  resolve_persistence_windows: 5
+  not_computable_persistence_windows: 3
+  # Must exceed the largest persistence count above (8) by at least the
+  # configured margin (2) -- see AlertingConfig.history_scan_windows.
+  history_scan_windows: 12
+  max_alerts_per_run: 25
 
-# Regression (e.g. demand forecasting): plain error magnitude metrics.
+# Regression (e.g. demand forecasting): plain error magnitude metrics. RMSE is
+# wired to the alert lifecycle; illustrative thresholds (50.0 fire / 40.0
+# clear) meant to be tuned against a real model's baseline error, not a claim
+# about any actual model's performance.
 performance_metrics:
   - name: rmse
+    alert_direction: above
+    fire_threshold: 50.0
+    clear_threshold: 40.0
   - name: mae

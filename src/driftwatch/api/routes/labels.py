@@ -6,9 +6,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from driftwatch.alerting.notifications import default_channels, notify_if_needed
 from driftwatch.api.deps import get_db
 from driftwatch.config.loader import ModelConfigNotFoundError, load_model_config
-from driftwatch.db.models import EvaluationWindow, Label, Model, Prediction
+from driftwatch.db.models import Alert, EvaluationWindow, Label, Model, Prediction
 from driftwatch.evaluation.performance import recompute_performance_for_window
 from driftwatch.hashing import compute_payload_hash
 
@@ -112,8 +113,14 @@ def ingest_labels(
             touched_window_ids.add(window.id)
 
     db.flush()
+    channels = default_channels()
     for window_id in touched_window_ids:
         recompute_performance_for_window(db, window_id)
+        touched_alerts = db.scalars(
+            select(Alert).where(Alert.last_seen_window_id == window_id)
+        ).all()
+        for alert in touched_alerts:
+            notify_if_needed(alert, channels)
 
     return LabelIngestResponse(
         inserted=inserted,

@@ -218,3 +218,149 @@ class PerformanceResult(Base):
     is_retroactive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     __table_args__ = (Index("ix_performance_results_window", "evaluation_window_id"),)
+
+
+class AlertKind(enum.StrEnum):
+    DRIFT = "drift"
+    PERFORMANCE = "performance"
+    NOT_COMPUTABLE = "not_computable"
+
+
+class AlertStatus(enum.StrEnum):
+    OPEN = "open"
+    ESCALATED = "escalated"
+    RESOLVED = "resolved"
+
+
+class Alert(Base):
+    """A stateful entity with a lifecycle (open -> escalated -> resolved),
+    not an event per window -- driftwatch.alerting.engine recomputes the
+    relevant streak from recent DriftResult/PerformanceResult history on
+    every evaluation and updates ONE row per signal identity, rather than
+    inserting a new row every time a window confirms the signal is still
+    active. See driftwatch.alerting.streaks for how the streak itself is
+    computed.
+
+    Identity (what makes two rows "the same recurring signal"): model_id +
+    kind + signal_name + feature_name + segment_dimension + segment_value.
+    Enforced by uq_alerts_active_identity below, scoped to non-resolved,
+    non-aggregate rows only -- a RESOLVED alert doesn't block a fresh row
+    when the same signal fires again later; that's a new episode, kept as
+    its own row for history.
+    """
+
+    __tablename__ = "alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    model_id: Mapped[str] = mapped_column(ForeignKey("models.model_id"), nullable=False)
+    kind: Mapped[AlertKind] = mapped_column(Enum(AlertKind, name="alert_kind"), nullable=False)
+    signal_name: Mapped[str] = mapped_column(String, nullable=False)
+    """test_method value (e.g. "psi") for kind=drift/not_computable on a
+    drift test; metric_name (e.g. "pr_auc") for kind=performance or
+    kind=not_computable on a performance metric."""
+    feature_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    """Feature name for drift/not_computable-on-a-drift-test alerts (or the
+    PREDICTION_SCORE_FEATURE_NAME sentinel). Null for performance alerts,
+    which aren't feature-scoped."""
+    segment_dimension: Mapped[str | None] = mapped_column(String, nullable=True)
+    segment_value: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    status: Mapped[AlertStatus] = mapped_column(
+        Enum(AlertStatus, name="alert_status"), nullable=False
+    )
+    consecutive_breaching_windows: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    consecutive_clear_windows: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+
+    # Evidence snapshot, frozen at the moment this row transitions to OPEN.
+    # Never updated afterward -- constraint: if config changes later, the
+    # alert must still explain why it fired under the rules in effect then.
+    evidence_statistic: Mapped[float | None] = mapped_column(Float, nullable=True)
+    evidence_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    evidence_baseline_id: Mapped[int | None] = mapped_column(
+        ForeignKey("baselines.id"), nullable=True
+    )
+    evidence_config_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    evidence_window_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_windows.id"), nullable=True
+    )
+    evidence_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    """not_computable_reason from the triggering row, for kind=not_computable."""
+
+    # A second evidence snapshot, frozen once at the moment this row
+    # transitions OPEN -> ESCALATED (never touched again after that, same
+    # freeze-once discipline as the open-time evidence above). An alert that
+    # opened at 0.11 and escalated at 0.42 should still be able to say so --
+    # without this, escalated_at is just a timestamp with no statistic behind
+    # it. Null until (unless) the alert actually escalates.
+    escalation_evidence_statistic: Mapped[float | None] = mapped_column(Float, nullable=True)
+    escalation_evidence_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    escalation_evidence_baseline_id: Mapped[int | None] = mapped_column(
+        ForeignKey("baselines.id"), nullable=True
+    )
+    escalation_evidence_config_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    escalation_evidence_window_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_windows.id"), nullable=True
+    )
+
+    # Currency tracking -- mutable, updated every run that confirms this signal
+    # is still active. This is the "updated last-seen" from a sustained streak,
+    # as opposed to the frozen evidence above.
+    first_opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_window_id: Mapped[int | None] = mapped_column(
+        ForeignKey("evaluation_windows.id"), nullable=True
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Notification idempotency: only re-notify when status changes from what
+    # was last notified, never on steady-state continuation of an open alert.
+    last_notified_status: Mapped[AlertStatus | None] = mapped_column(
+        Enum(AlertStatus, name="alert_status"), nullable=True
+    )
+    last_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Delivery-failure currency, not evidence: overwritten on every failed
+    # attempt, cleared implicitly by nothing (a persistently-failing channel
+    # keeps this populated). A raising/hanging notification channel must
+    # never fail the evaluation run or roll back this row's transition --
+    # see driftwatch.alerting.notifications.notify_if_needed, which catches
+    # per-channel and records the failure here instead of propagating.
+    last_notification_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_notification_error_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Aggregation: when more new alerts would open in one run than
+    # AlertingConfig.max_alerts_per_run, they're rolled into one row like this
+    # instead, recording how many and which.
+    is_aggregate: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    aggregated_signal_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    aggregated_signals: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
+
+    __table_args__ = (
+        Index("ix_alerts_model", "model_id"),
+        Index(
+            "uq_alerts_active_identity",
+            "model_id",
+            "kind",
+            "signal_name",
+            text("COALESCE(feature_name, '')"),
+            text("COALESCE(segment_dimension, '')"),
+            text("COALESCE(segment_value, '')"),
+            unique=True,
+            # Postgres stores the enum member NAME (uppercase), not the Python
+            # value -- see TestMethod's precedent in the initial migration.
+            postgresql_where=text("status != 'RESOLVED' AND NOT is_aggregate"),
+        ),
+    )

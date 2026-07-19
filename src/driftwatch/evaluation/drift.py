@@ -5,6 +5,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from driftwatch.alerting.engine import evaluate_drift_alerts_for_window
 from driftwatch.config.loader import compute_config_hash, load_model_config, load_profile
 from driftwatch.config.schema import FeatureSpec, ModelConfig, Profile
 from driftwatch.db.models import (
@@ -144,6 +145,7 @@ def evaluate_window(
         session.add(result)
 
     session.flush()
+    evaluate_drift_alerts_for_window(session, window, profile)
     recompute_performance_for_window(session, window.id)
 
     return window

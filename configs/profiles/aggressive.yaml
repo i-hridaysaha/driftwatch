@@ -1,8 +1,10 @@
 name: aggressive
 description: >
   Fast detection for adversarial or rapidly-shifting inputs (e.g. fraud, real-time
-  bidding). Short evaluation windows, small effect-size thresholds, and immediate
-  escalation. Tolerates false positives in exchange for catching real drift quickly.
+  bidding). Short evaluation windows, small effect-size thresholds, narrow hysteresis
+  gaps, and low persistence counts on both firing and clearing. Tolerates false
+  positives and quick alert churn in exchange for catching real drift quickly and
+  not sitting on a stale alert once it's genuinely over.
 
 evaluation:
   window: "1h"
@@ -20,33 +22,57 @@ drift_tests:
   continuous:
     methods: [psi, ks]
     psi_threshold: 0.1  # PSI convention: >0.1 is "moderate" shift
+    psi_clear_threshold: 0.07  # narrow gap (30%): clears quickly once the shift subsides
     # KS D-statistic is unitless, [0,1]. 0.15 catches a modest-but-real shift
     # -- big enough that it's not just sampling noise even at this profile's
     # small (50-row) minimum window, without needing near-total separation
     # between the two empirical CDFs.
     ks_statistic_threshold: 0.15
+    ks_statistic_clear_threshold: 0.1  # narrow gap (33%)
   categorical:
     methods: [chi_square]
     cramers_v_threshold: 0.1  # Cohen's (1988) "small" effect for df=1
+    cramers_v_clear_threshold: 0.07  # narrow gap (30%)
   prediction_score:
     method: jsd
     jsd_threshold: 0.05
+    jsd_clear_threshold: 0.03  # narrow gap (40%)
 
 multiple_comparison_correction:
   method: benjamini_hochberg
   fdr_alpha: 0.10
 
 alerting:
-  persistence_windows: 1
-  severity_thresholds:
-    warning: 1
-    critical: 2
+  # Fires on the very first breaching window -- "fast detection" is this
+  # profile's entire premise. Escalates after 3 consecutive windows still
+  # breaching (a genuinely sustained issue, not a one-off spike). Resolves
+  # after 2 consecutive clear windows -- short, matching the narrow hysteresis
+  # gaps above: this profile is built to react quickly in both directions,
+  # not just on the way up.
+  fire_persistence_windows: 1
+  escalate_persistence_windows: 3
+  resolve_persistence_windows: 2
+  # A broken feature is worth flagging almost as fast as real drift --
+  # silence is the failure mode this service exists to prevent.
+  not_computable_persistence_windows: 2
+  # Must exceed the largest persistence count above (3) by at least the
+  # configured margin (2) -- see AlertingConfig.history_scan_windows. A
+  # smaller value would mean a real 3-window escalation streak could never
+  # be reconstructed from history, and alerts would silently never escalate.
+  history_scan_windows: 6
+  max_alerts_per_run: 10
 
 # Binary classification under class imbalance (e.g. fraud): accuracy and ROC-AUC
 # are misleading here, so PR-AUC and threshold/budget-scoped precision/recall are
 # the headline metrics. ROC-AUC is kept only as a secondary reference point.
+# PR-AUC is the one metric wired to the alert lifecycle here; illustrative
+# thresholds (0.3 fire / 0.4 clear) meant to be tuned against a real model's
+# baseline PR-AUC, not a claim about any actual model's performance.
 performance_metrics:
   - name: pr_auc
+    alert_direction: below
+    fire_threshold: 0.3
+    clear_threshold: 0.4
   - name: precision_at_threshold
     params:
       threshold: 0.5
