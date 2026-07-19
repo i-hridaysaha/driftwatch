@@ -1,0 +1,59 @@
+# No feature-shift events at all -- inputs never move. The only event is
+# label_noise, which degrades the true relationship between prediction
+# score and label starting at window 40. early_cutoff_hours is
+# deliberately short (2h, versus a 6h median delay) so most labels for a
+# window aren't in yet by the time evaluate_range runs -- the window's
+# INITIAL performance is computed from too few labels to be reliable
+# (often not_computable outright), and the degradation only becomes
+# visible in the LATEST revision once backfill completes.
+name: concept_drift
+description: >
+  Feature and prediction-score distributions stay stable throughout.
+  label_noise increases starting at window 40, degrading PR-AUC -- but
+  only visible after label backfill, not at initial evaluation time.
+model_id: demo-concept-drift
+profile: patient
+seed: 1004
+start_date: "2026-01-01T00:00:00Z"
+window: "1h"
+stable_windows: 40
+total_windows: 60
+predictions_per_window: 700
+baseline_size: 2000
+prediction_type: binary_classification
+prediction_distribution: {type: beta, a: 0.4, b: 0.4}
+
+features:
+  - name: age
+    dtype: continuous
+    nullable: false
+    distribution: {type: normal, mean: 40, std: 12}
+  - name: income
+    dtype: continuous
+    nullable: true
+    missing_rate: 0.05
+    distribution: {type: lognormal, mean: 10.5, sigma: 0.6}
+  - name: region
+    dtype: categorical
+    nullable: false
+    categories: [EU, US, APAC]
+    weights: [0.36, 0.34, 0.3]
+  - name: device_id
+    dtype: categorical
+    nullable: false
+    cardinality: 15
+
+segments: [region]
+min_segment_size: 30
+
+label_base_noise_rate: 0.05
+label_delay:
+  median_hours: 6
+  sigma: 0.7
+  max_hours: 72
+  early_cutoff_hours: 2
+
+events:
+  - shift_type: label_noise
+    magnitude: 0.70
+    start_window: 40

@@ -42,9 +42,8 @@ Dependencies are managed with [uv](https://docs.astral.sh/uv/).
 
 **Phase 1: repo skeleton.** A FastAPI app with a single `/health` endpoint,
 the config-loading layer (Pydantic v2 schema + loader for per-profile YAML),
-two shipped detection profiles (`aggressive` / `conservative` — see below),
-Docker Compose wiring for Postgres + API + dashboard, and CI running
-ruff/mypy/pytest.
+shipped detection profiles (see "Detection profiles" below), Docker Compose
+wiring for Postgres + API + dashboard, and CI running ruff/mypy/pytest.
 
 **Phase 2: data model and migrations.** SQLAlchemy models and an Alembic
 migration for the full storage layer — `models`, `baselines` +
@@ -111,13 +110,21 @@ hysteresis, evidence-snapshot, not-computable-as-its-own-alert-type,
 retroactive-recompute, aggregation-cap, and notification-idempotency
 decisions this phase made explicit.
 
-**Phase 7 (this commit): Streamlit dashboard.** Read-only, enforced at the
-transaction level (`SET TRANSACTION READ ONLY`), with every chart's full
-configuration — model, date range, feature, test method, segment, window,
-metric — carried in the URL query string, so a chart can be regenerated
-identically from its link alone. See "Dashboard" below for the
-three-state-rendering, deterministic-color, and SQL-aggregation decisions
-this phase made explicit.
+**Phase 7: Streamlit dashboard.** Read-only, enforced at the transaction
+level (`SET TRANSACTION READ ONLY`), with every chart's full configuration —
+model, date range, feature, test method, segment, window, metric — carried
+in the URL query string, so a chart can be regenerated identically from its
+link alone. See "Dashboard" below for the three-state-rendering,
+deterministic-color, and SQL-aggregation decisions this phase made explicit.
+
+**Phase 8 (this commit): demo data generator.** Four declarative YAML
+scenarios (`clean`, `covariate_shift`, `segment_isolated`, `concept_drift`),
+a fully deterministic, seeded, pure generator, and a post-generation
+verification script that asserts each scenario numerically produced what it
+claims — run in CI for all four. `driftwatch demo <scenario>` is one command
+from an empty database to a fully evaluated dataset. See "Demo data
+generator" below for the determinism, staggered-label, and
+scenario-tuning-via-config-not-results decisions this phase made explicit.
 
 ## Statistical methods
 
@@ -428,21 +435,35 @@ baseline registration exists) references one of these by name.
   below the 0.1 fire line) since fast-moving inputs are expected to cross
   back and forth quickly. Trades false positives for the earliest possible
   signal.
-- **`conservative.yaml`** — for slow-moving population drift (e.g. credit
-  risk, demand forecasting). Daily windows, larger effect-size thresholds —
-  PSI 0.25 (the "significant shift" convention boundary), KS D-statistic 0.3
-  (real, unambiguous separation — a large 500+ row window makes even modest
-  shifts easy to detect, so the bar has to be higher than the aggressive
-  profile's), and Cramer's V 0.3 (Cohen's "medium" effect) — and requires
-  3 consecutive breaching windows to fire (`fire_persistence_windows: 3`)
-  and 8 to escalate. Its hysteresis gap is wide (PSI clears at 0.15, a full
-  0.1 below the 0.25 fire line) so a single noisy window drifting back
-  toward baseline doesn't reset a real, slow-building trend. Prioritizes
-  avoiding alert fatigue over catching the earliest signal.
+- **`patient.yaml`** — for slow-moving population drift on a
+  binary-classification model, where a single bad window is noise, not a
+  signal. Hourly windows (like `aggressive`, unlike an earlier
+  daily-window `conservative` profile this replaced — see below), wide
+  effect-size thresholds — PSI 0.25 (the "significant shift" convention
+  boundary), KS D-statistic 0.3, and Cramer's V 0.3 (Cohen's "medium"
+  effect) — and requires 3 consecutive breaching windows to fire
+  (`fire_persistence_windows: 3`) and 8 to escalate. Its hysteresis gap is
+  wide (PSI clears at 0.15, a full 0.1 below the 0.25 fire line) so a
+  single noisy window drifting back toward baseline doesn't reset a real,
+  slow-building trend. Precision/recall-style performance metrics
+  (`pr_auc`, matching `aggressive`'s), not regression error metrics.
+  Prioritizes avoiding alert fatigue over catching the earliest signal.
 
 Persistence counts and hysteresis gap widths are not incidental — they're
 as deliberate a difference between the two profiles as the drift
 thresholds themselves; see "Alerting" above for how both are used.
+
+An earlier third profile, `conservative.yaml`, shipped alongside these two
+through phase 7: daily windows and regression error metrics (`rmse`/`mae`)
+for slow-moving, continuous-label domains like demand forecasting. Phase 8
+removed it — every demo scenario needed a binary-classification model
+(`rmse`/`mae` don't apply to one), and once `patient.yaml` was written to
+fill that gap, nothing in the repo exercised `conservative.yaml` against
+real data anymore, only shallow config-loading tests. An unverified profile
+sitting in a repo about monitoring *correctness* is worse than not shipping
+it at all, so it was deleted rather than kept as an untested example —
+`patient.yaml` is what its "wait for a real signal" design point looks like
+for the kind of model this project actually demonstrates.
 
 Note these thresholds are not the same numbers the old `ks_alpha`/
 `chi_square_alpha` significance levels used before this phase renamed them
@@ -562,6 +583,108 @@ pipeline already writes — `drift_results`, `performance_results`, `alerts`,
   guard above is what actually makes "no writes" true regardless, and
   provisioning a separate role is real infra work a later phase (or a real
   deployment) would do, not a gap in this phase's read-only guarantee.
+
+## Demo data generator
+
+`src/driftwatch/demo/` produces fully deterministic evaluation history for
+the dashboard and README screenshots — every published number in this
+project comes from a real `driftwatch demo <scenario>` run against a real
+Postgres, never a hand-edited result.
+
+**These scenarios are staged demonstrations, not a benchmark.** Every
+scenario parameter — event magnitude, segment weights, sample sizes, and
+in particular the prediction-score distribution — was chosen and tuned to
+produce a clear, legible signal on a dashboard screenshot, and none of it
+is an empirical claim about this service's detection sensitivity on real
+production data. The score distribution all four scenarios use,
+`Beta(0.4, 0.4)` (U-shaped: scores cluster near 0 and 1), is a concrete
+example: it was chosen because a moderate, unimodal score distribution like
+`Beta(2, 5)` — closer to what a real fraud or risk model's score
+distribution might look like — makes the generator's `label = bernoulli
+(score)` mechanic produce labels with almost no rank correlation to the
+score at all (PR-AUC caps out around 0.5 regardless of injected noise; see
+`concept_drift` below), leaving nothing for `concept_drift`'s label-noise
+event to visibly degrade. `Beta(0.4, 0.4)` is not a claim that real fraud
+scores look bimodal — it is a demo-generator implementation detail, chosen
+to make one specific chart legible, and should not be read as anything
+else.
+
+```bash
+uv run python -m driftwatch.cli demo clean            # reset DB, load, evaluate — one command
+uv run python -m driftwatch.cli demo-verify clean      # assert it produced what it claims
+```
+
+`driftwatch demo <scenario>` resets the *entire* database (every app table,
+not just rows for that scenario's `model_id` — see `driftwatch.demo.build
+.reset_database`), registers the baseline, ingests predictions, ingests
+labels on their staggered delay schedule, and runs `evaluate_range` over the
+full window span, in one call. Because the reset is global, only one
+scenario's data can live in the database at a time — `demo-verify` checks
+this explicitly (`EvaluationWindow` count for the scenario's `model_id` must
+match `scenario.total_windows`) rather than letting an empty or
+wrong-scenario database pass every other check vacuously.
+
+- **Deterministic by construction, not by convention.** `generate_scenario_data`
+  is a pure function — no I/O, no wall-clock — that draws from one
+  `numpy.random.Generator` seeded once from `scenario.seed`, in a fixed call
+  order (baseline, then window 0..N-1 in order; within each window:
+  segments, then features in declared order, then prediction score, then
+  label offsets/noise/delay). Every timestamp is computed from
+  `scenario.start_date`, a fixed date declared in the YAML, never
+  `datetime.now()` — regenerating months later produces byte-identical rows
+  and identical dashboard chart URLs. Enforced by
+  `tests/demo/test_generator_determinism.py`, which runs every shipped
+  scenario twice and asserts the resulting data is equal, not just
+  documented as an intention.
+- **Windows must agree with the profile, or fail loudly at build time.**
+  `evaluate_range` groups predictions into windows using the *profile's*
+  `evaluation.window`, but the generator groups them into windows using the
+  *scenario's own* declared `window` field. If those two ever disagree — an
+  easy mistake, since nothing else connects them — the generator's "window
+  index N" (what every event's `start_window` and every verification
+  assertion is expressed in) silently stops corresponding to what
+  `evaluate_range` actually evaluates. `build_scenario` checks this
+  explicitly (`_check_window_matches_profile`) and raises before writing
+  anything, rather than producing a quietly wrong dataset.
+- **Labels arrive staggered, in two phases, for a real before/after-backfill
+  split.** Each label's delay is drawn from a configurable lognormal
+  (`scenario.label_delay`). Labels with `delay_hours <= early_cutoff_hours`
+  are inserted *before* the single `evaluate_range` call, so a window's
+  initial performance reflects only them; labels with longer delay are
+  inserted *after*, triggering `recompute_performance_for_window` for each
+  touched window. `concept_drift` deliberately sets `early_cutoff_hours`
+  short relative to the median delay, so most windows are initially
+  `not_computable` for lack of labels and the performance degradation is
+  only visible once backfill completes — mirroring the drift-final vs.
+  performance-revisable split described above, not a separate mechanism.
+- **A structural, expected `not_computable` pattern, documented rather than
+  hidden.** All four scenarios segment by `region`, which is also a
+  regular monitored feature — a real, common combination (the ingestion
+  API requires a segment dimension to also be a declared feature; see
+  `driftwatch.api.validation.extract_segment_values`). But evaluating a
+  categorical feature's drift *within* a segment defined by that same
+  feature is structurally degenerate: every row in, say, the `region=EU`
+  segment has `region == 'EU'` by construction, so chi-square can never see
+  more than one category there and always reports `not_computable`. This
+  is an inherent property of `_evaluate_all_features`'s "evaluate every
+  declared feature at every segment level, including the segment-defining
+  feature itself" design, not a scenario bug — `driftwatch/demo/verify.py`
+  excludes exactly this pattern (`_is_structural_self_segment_alert`) from
+  every "no unexpected alerts" check, rather than tuning it away or
+  special-casing each scenario.
+- **Scenarios are tuned via config, never via results.** Getting all four
+  scenarios to produce exactly their claimed signal — and nothing else —
+  took real iteration against a live database: segment population weights,
+  `predictions_per_window`, and `baseline_size` all affect how much
+  sampling noise a fixed effect-size threshold sees at the segment level,
+  and a scenario that looked clean at one sample size sometimes wasn't at
+  another (see `segment_isolated`'s injected shift magnitude, tuned down
+  from an initial 5σ — which blew through the *global* PSI threshold even
+  confined to a 15%-weighted segment — to 1σ, verified numerically to stay
+  under threshold globally while still breaching locally). Every number in
+  every scenario's alert history comes from a real evaluation run;
+  `driftwatch demo-verify <scenario>` is what makes that a checked
+  guarantee instead of a claim.
 
 ## Running locally
 

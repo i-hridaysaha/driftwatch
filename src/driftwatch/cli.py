@@ -76,6 +76,34 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_demo(args: argparse.Namespace) -> int:
+    # Lazy import: driftwatch.demo.build imports evaluate_range from this
+    # module, so a top-level import here would be circular.
+    from driftwatch.demo.build import build_scenario
+    from driftwatch.demo.loader import ScenarioNotFoundError, list_scenario_names
+
+    try:
+        summary = build_scenario(args.scenario, reset=not args.no_reset)
+    except ScenarioNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        print(f"available scenarios: {', '.join(list_scenario_names())}", file=sys.stderr)
+        return 1
+
+    print(f"scenario: {summary.scenario_name}  (model_id={summary.model_id})")
+    print(f"baseline records: {summary.baseline_records}")
+    print(f"predictions: {summary.predictions}")
+    print(f"labels: {summary.labels_early} before evaluation, {summary.labels_late} retroactive")
+    print(f"windows: {summary.windows_evaluated} evaluated, {summary.windows_skipped} skipped")
+    return 0
+
+
+def _cmd_demo_verify(args: argparse.Namespace) -> int:
+    from driftwatch.demo.verify import verify_scenario
+
+    ok = verify_scenario(args.scenario, verbose=True)
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="driftwatch")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -92,6 +120,23 @@ def main(argv: list[str] | None = None) -> int:
         help="delete and re-evaluate windows that already exist in this range",
     )
     evaluate_parser.set_defaults(func=_cmd_evaluate)
+
+    demo_parser = subparsers.add_parser(
+        "demo", help="reset the database and load a named demo scenario end to end"
+    )
+    demo_parser.add_argument("scenario", help="scenario name, e.g. clean, covariate_shift")
+    demo_parser.add_argument(
+        "--no-reset",
+        action="store_true",
+        help="load additively instead of truncating all data first",
+    )
+    demo_parser.set_defaults(func=_cmd_demo)
+
+    demo_verify_parser = subparsers.add_parser(
+        "demo-verify", help="assert a loaded demo scenario produced what it claims"
+    )
+    demo_verify_parser.add_argument("scenario", help="scenario name")
+    demo_verify_parser.set_defaults(func=_cmd_demo_verify)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

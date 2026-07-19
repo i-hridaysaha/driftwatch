@@ -1,0 +1,62 @@
+# The shift only ever applies to the APAC segment (15% of traffic), with
+# a finite duration so it fires and later resolves. Region weights and
+# predictions_per_window are tuned (see the demo-verify assertions) so the
+# global aggregate never crosses the fire threshold even while APAC's own
+# local statistic breaches badly -- this is verified numerically after
+# generation, not assumed.
+name: segment_isolated
+description: >
+  A shift confined to a single segment (region=APAC, 15% of traffic).
+  The global aggregate must stay under the fire threshold throughout;
+  the APAC segment alone should breach, fire, and -- once the shift ends
+  at window 52 -- resolve.
+model_id: demo-segment-isolated
+profile: patient
+seed: 1003
+start_date: "2026-01-01T00:00:00Z"
+window: "1h"
+stable_windows: 32
+total_windows: 55
+predictions_per_window: 500
+baseline_size: 1500
+prediction_type: binary_classification
+prediction_distribution: {type: beta, a: 0.4, b: 0.4}
+
+features:
+  - name: age
+    dtype: continuous
+    nullable: false
+    distribution: {type: normal, mean: 40, std: 12}
+  - name: income
+    dtype: continuous
+    nullable: true
+    missing_rate: 0.05
+    distribution: {type: lognormal, mean: 10.5, sigma: 0.6}
+  - name: region
+    dtype: categorical
+    nullable: false
+    categories: [EU, US, APAC]
+    weights: [0.42, 0.43, 0.15]
+  - name: device_id
+    dtype: categorical
+    nullable: false
+    cardinality: 15
+
+segments: [region]
+min_segment_size: 30
+
+label_base_noise_rate: 0.05
+label_delay:
+  median_hours: 6
+  sigma: 0.7
+  max_hours: 72
+  early_cutoff_hours: 6
+
+events:
+  - feature: age
+    shift_type: mean_shift
+    magnitude: 1.0
+    start_window: 32
+    duration_windows: 10
+    segment_dimension: region
+    segment_value: APAC

@@ -1,0 +1,25 @@
+model_id: demo-covariate-shift
+profile: patient
+prediction_type: binary_classification
+schema:
+  features:
+  - name: age
+    dtype: continuous
+    nullable: false
+  - name: income
+    dtype: continuous
+    nullable: true
+  - name: region
+    dtype: categorical
+    nullable: false
+  - name: device_id
+    dtype: categorical
+    nullable: false
+  prediction:
+    dtype: continuous
+  label:
+    dtype: categorical
+segments:
+  dimensions:
+  - region
+  min_segment_size: 30

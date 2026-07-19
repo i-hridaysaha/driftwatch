@@ -1,0 +1,78 @@
+name: patient
+description: >
+  Binary classification under a "wait for a real signal, don't churn on
+  noise" philosophy: wide effect-size thresholds (segment-level tests run
+  on a few hundred rows at a time, and a narrow threshold fires on pure
+  sampling noise there just as readily as it would on a small daily batch)
+  and high persistence counts, on hourly windows, with precision/recall-
+  style performance metrics. An earlier `conservative` profile covered this
+  same "patient" posture but with daily windows and regression error
+  metrics (rmse/mae) that assume continuous labels -- it was removed once
+  nothing in the repo exercised it against real data (a binary-
+  classification-only demo has no use for regression metrics), rather than
+  leaving an unverified config in a repo about monitoring correctness. This
+  profile is what a "patient" profile looks like for the kind of model this
+  project's demo data actually represents.
+
+evaluation:
+  window: "1h"
+  min_window_size: 50
+  # Same reasoning as aggressive: short slack for ordinary ingestion lag,
+  # not a deliberate slow-detection choice -- "patient" here refers to
+  # alert persistence and effect-size thresholds, not window finalization
+  # latency.
+  watermark: "10m"
+
+drift_tests:
+  continuous:
+    methods: [psi, ks]
+    psi_threshold: 0.25
+    psi_clear_threshold: 0.15
+    ks_statistic_threshold: 0.3
+    ks_statistic_clear_threshold: 0.15
+  categorical:
+    methods: [chi_square]
+    cramers_v_threshold: 0.3
+    cramers_v_clear_threshold: 0.15
+  prediction_score:
+    method: jsd
+    jsd_threshold: 0.15
+    jsd_clear_threshold: 0.08
+
+multiple_comparison_correction:
+  method: benjamini_hochberg
+  fdr_alpha: 0.01
+
+alerting:
+  # High persistence, hourly-window equivalent of a "wait several days"
+  # posture: 3 consecutive breaching windows to open, 8 to escalate, 5 clear
+  # windows to resolve. A lone breaching window -- e.g. a single-window
+  # blip -- can never open an alert on its own.
+  fire_persistence_windows: 3
+  escalate_persistence_windows: 8
+  resolve_persistence_windows: 5
+  not_computable_persistence_windows: 3
+  # Must exceed the largest persistence count above (8) by at least the
+  # configured margin (2) -- see AlertingConfig.history_scan_windows.
+  history_scan_windows: 12
+  max_alerts_per_run: 25
+
+# Binary classification, same headline metric as aggressive (PR-AUC under
+# class imbalance) -- only the persistence/hysteresis philosophy differs
+# between the two profiles, not the metric choice, since both are demoing
+# the same kind of model.
+performance_metrics:
+  - name: pr_auc
+    alert_direction: below
+    fire_threshold: 0.5
+    clear_threshold: 0.65
+  - name: precision_at_threshold
+    params:
+      threshold: 0.5
+  - name: recall_at_threshold
+    params:
+      threshold: 0.5
+  - name: precision_at_k
+    params:
+      n: 100
+  - name: roc_auc

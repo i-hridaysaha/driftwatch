@@ -1,0 +1,61 @@
+# Two events on the same feature: a single-window blip (must be
+# SUPPRESSED -- patient's fire_persistence_windows=3 means one
+# breaching window can never open a real alert) followed, after a long
+# clear gap, by a sustained shift big enough to fire AND escalate.
+name: covariate_shift
+description: >
+  Sharp single-feature mean shift. A 1-window blip at window 40 (should
+  never reach persistence -- a suppressed signal), then a sustained,
+  larger shift starting at window 55 that fires and escalates.
+model_id: demo-covariate-shift
+profile: patient
+seed: 1002
+start_date: "2026-01-01T00:00:00Z"
+window: "1h"
+stable_windows: 32
+total_windows: 90
+predictions_per_window: 500
+baseline_size: 1500
+prediction_type: binary_classification
+prediction_distribution: {type: beta, a: 0.4, b: 0.4}
+
+features:
+  - name: age
+    dtype: continuous
+    nullable: false
+    distribution: {type: normal, mean: 40, std: 12}
+  - name: income
+    dtype: continuous
+    nullable: true
+    missing_rate: 0.05
+    distribution: {type: lognormal, mean: 10.5, sigma: 0.6}
+  - name: region
+    dtype: categorical
+    nullable: false
+    categories: [EU, US, APAC]
+    weights: [0.36, 0.34, 0.3]
+  - name: device_id
+    dtype: categorical
+    nullable: false
+    cardinality: 15
+
+segments: [region]
+min_segment_size: 30
+
+label_base_noise_rate: 0.05
+label_delay:
+  median_hours: 6
+  sigma: 0.7
+  max_hours: 72
+  early_cutoff_hours: 6
+
+events:
+  - feature: age
+    shift_type: mean_shift
+    magnitude: 3.5
+    start_window: 40
+    duration_windows: 1
+  - feature: age
+    shift_type: mean_shift
+    magnitude: 4.5
+    start_window: 55

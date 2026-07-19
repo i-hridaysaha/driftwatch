@@ -1,0 +1,53 @@
+# No injected events at all -- every window is generated from the exact
+# same distributions as the baseline. The claim this scenario makes is
+# "nothing fires", which tests/demo/test_verify.py-style checks (via
+# `driftwatch demo-verify clean`) confirm by asserting zero open alerts,
+# not by omission.
+name: clean
+description: >
+  Stable throughout. No injected drift, no injected label noise. Every
+  drift signal and the performance metric should stay quiet for the
+  entire range.
+model_id: demo-clean
+profile: patient
+seed: 1001
+start_date: "2026-01-01T00:00:00Z"
+window: "1h"
+stable_windows: 40
+total_windows: 40
+predictions_per_window: 700
+baseline_size: 2000
+prediction_type: binary_classification
+prediction_distribution: {type: beta, a: 0.4, b: 0.4}
+
+features:
+  - name: age
+    dtype: continuous
+    nullable: false
+    distribution: {type: normal, mean: 40, std: 12}
+  - name: income
+    dtype: continuous
+    nullable: true
+    missing_rate: 0.05
+    distribution: {type: lognormal, mean: 10.5, sigma: 0.6}
+  - name: region
+    dtype: categorical
+    nullable: false
+    categories: [EU, US, APAC]
+    weights: [0.36, 0.34, 0.3]
+  - name: device_id
+    dtype: categorical
+    nullable: false
+    cardinality: 15
+
+segments: [region]
+min_segment_size: 30
+
+label_base_noise_rate: 0.05
+label_delay:
+  median_hours: 6
+  sigma: 0.7
+  max_hours: 72
+  early_cutoff_hours: 6
+
+events: []

@@ -46,6 +46,22 @@ jobs:
       - name: Test (pytest)
         run: uv run pytest
 
+      - name: Demo scenarios: generate and verify
+        # pytest's migrated_db fixture downgrades back to "base" once its
+        # last module finishes, so the schema can't be assumed to still be
+        # there -- re-run migrations explicitly rather than relying on
+        # pytest's leftover state. Each scenario truncates every app table
+        # on load (see driftwatch.demo.build.reset_database), so these must
+        # run one at a time, generate-then-verify, never in parallel.
+        run: |
+          uv run alembic upgrade head
+          for scenario in clean covariate_shift segment_isolated concept_drift; do
+            echo "::group::$scenario"
+            uv run python -m driftwatch.cli demo "$scenario"
+            uv run python -m driftwatch.cli demo-verify "$scenario"
+            echo "::endgroup::"
+          done
+
   docker-compose-smoke-test:
     # Verifies the stated deliverable "docker compose up brings the whole
     # stack up" actually works, on a runner that has Docker (this project's

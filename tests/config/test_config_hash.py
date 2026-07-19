@@ -14,9 +14,9 @@ def test_same_config_hashes_the_same() -> None:
 def test_different_profile_hashes_differently() -> None:
     model_config = load_model_config("example-model")
     aggressive = load_profile("aggressive")
-    conservative = load_profile("conservative")
+    patient = load_profile("patient")
 
     a = compute_config_hash(model_config, aggressive)
-    b = compute_config_hash(model_config, conservative)
+    b = compute_config_hash(model_config, patient)
 
     assert a != b
