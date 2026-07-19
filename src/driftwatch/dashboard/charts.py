@@ -220,9 +220,20 @@ def _zero_rule() -> AltChart:
 
 
 def _timeline_layer(
-    df: pd.DataFrame, x_field: str, tooltip: list[alt.Tooltip], point_size: int = 60
+    df: pd.DataFrame,
+    x_field: str,
+    tooltip: list[alt.Tooltip],
+    point_size: int = 60,
+    *,
+    attach_data: bool = True,
 ) -> AltChart:
-    base = alt.Chart(df)
+    """attach_data=False is required inside a faceted chart: a layer that
+    carries its own explicit dataframe is NOT filtered per facet by
+    Vega-Lite, so every facet cell would render every segment's points
+    overlaid on top of each other instead of just its own. Passing no data
+    here lets the layer inherit the already-faceted subset from the parent
+    facet operator's own `data=` argument instead."""
+    base = alt.Chart(df) if attach_data else alt.Chart()
     line = (
         base.transform_filter(alt.datum.state == "computed")
         .mark_line(color=_STATE_COLORS["normal"], strokeWidth=1.5)
@@ -304,7 +315,7 @@ def segment_view_chart(
         alt.layer(
             _zero_rule(),
             _threshold_rules(fire_threshold, clear_threshold, plotted["window_end"].max()),
-            _timeline_layer(plotted, "window_end", tooltip, point_size=40),
+            _timeline_layer(plotted, "window_end", tooltip, point_size=40, attach_data=False),
         )
         .resolve_scale(color="independent", shape="independent")
         .encode(y=alt.Y(scale=alt.Scale(domain=[y_min, y_max])))
@@ -313,7 +324,12 @@ def segment_view_chart(
     # small constant dataframes (repeated identically in every facet cell,
     # which is exactly what a reference line should do), so Altair can't
     # infer one shared top-level dataset for the whole layered spec on its
-    # own -- facet() needs `plotted` named explicitly instead.
+    # own -- facet() needs `plotted` named explicitly instead. The data
+    # layer itself (_timeline_layer) is built with attach_data=False above
+    # for exactly the same reason in reverse: it must NOT carry its own
+    # dataframe, so it inherits the correctly-faceted per-segment subset
+    # from this facet() call instead of re-rendering all segments' points
+    # in every cell.
     faceted = layers.properties(width=width, height=height).facet(
         data=plotted, column=alt.Column("segment:N", sort=list(segments), title=None)
     )

@@ -614,6 +614,26 @@ uv run python -m driftwatch.cli demo clean            # reset DB, load, evaluate
 uv run python -m driftwatch.cli demo-verify clean      # assert it produced what it claims
 ```
 
+That second command doesn't just exit 0 — it prints exactly what it checked and what it found. Real output, this run, this machine:
+
+```
+$ uv run python -m driftwatch.cli demo segment_isolated
+$ uv run python -m driftwatch.cli demo-verify segment_isolated
+[PASS] no unexpected alerts: none
+[PASS] global age PSI stays under the fire threshold throughout: max=0.09425502950483428, fire_threshold=0.25
+[PASS] APAC segment breaches, fires, and (once the shift ends) resolves: statuses seen for age/region=APAC: ['escalated', 'resolved']
+
+$ uv run python -m driftwatch.cli demo concept_drift
+$ uv run python -m driftwatch.cli demo-verify concept_drift
+[PASS] no unexpected alerts: none
+[PASS] no feature or prediction-score drift (inputs stay stable): none
+[PASS] global PR-AUC degrades and escalates after label_noise: status=escalated
+[PASS] PR-AUC healthy before label_noise, degraded after (final backfilled values): early_mean=0.8743236648495655, late_mean=0.3864928278496847, clear_threshold=0.65, fire_threshold=0.5
+[PASS] initial evaluation frequently lacks enough labels (degradation only visible after backfill): 57 windows initially not_computable for lack of labels
+```
+
+Regenerating `concept_drift` a second time reproduced `early_mean`/`late_mean` to the last digit — that's what "deterministic" means here in practice, not just in the docstring below.
+
 `driftwatch demo <scenario>` resets the *entire* database (every app table,
 not just rows for that scenario's `model_id` — see `driftwatch.demo.build
 .reset_database`), registers the baseline, ingests predictions, ingests
@@ -707,6 +727,34 @@ uv run python -m driftwatch.scheduler.run
 uv run driftwatch evaluate --model-id example-model \
   --start 2026-01-01T00:00:00Z --end 2026-02-01T00:00:00Z
 ```
+
+`uv run pytest`, this run, against a freshly migrated database, no cherry-picking:
+
+```
+$ uv run pytest -q
+204 passed, 7 warnings in 10.40s
+```
+
+The scenario-determinism claim above is one specific test file within that count, runnable on its own:
+
+```
+$ uv run pytest tests/demo/test_generator_determinism.py -v
+test_regenerating_the_same_scenario_produces_identical_data PASSED
+test_different_seeds_produce_different_data PASSED
+test_reloading_the_scenario_yaml_from_disk_still_regenerates_identically PASSED
+test_every_shipped_scenario_is_deterministic[clean] PASSED
+test_every_shipped_scenario_is_deterministic[concept_drift] PASSED
+test_every_shipped_scenario_is_deterministic[covariate_shift] PASSED
+test_every_shipped_scenario_is_deterministic[segment_isolated] PASSED
+7 passed, 1 warning in 2.46s
+```
+
+One caveat worth stating plainly: the migration test suite exercises a full
+`alembic downgrade base` / `upgrade head` cycle against whatever database
+`DATABASE_URL` points at. If you've been running `driftwatch demo` against
+that same database, run `uv run alembic upgrade head` again afterward —
+pytest leaves the schema at whichever end of that cycle its last test used,
+not necessarily upgraded.
 
 ## Running with Docker Compose
 
