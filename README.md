@@ -104,12 +104,20 @@ pipeline" below for the event-time-vs-ingestion-time, the
 drift-final-vs-performance-revisable lifecycle split, and the
 idempotency-by-constraint decisions this phase made explicit.
 
-**Phase 6 (this commit): alerting.** An alert is a stateful row (`open` ->
-`escalated` -> `resolved`), not an event per window — sustained drift across
-20 windows is one row with an updated `last_seen`, not 20. See "Alerting"
-below for the hysteresis, evidence-snapshot, not-computable-as-its-own-
-alert-type, retroactive-recompute, aggregation-cap, and notification-
-idempotency decisions this phase made explicit.
+**Phase 6: alerting.** An alert is a stateful row (`open` -> `escalated` ->
+`resolved`), not an event per window — sustained drift across 20 windows is
+one row with an updated `last_seen`, not 20. See "Alerting" below for the
+hysteresis, evidence-snapshot, not-computable-as-its-own-alert-type,
+retroactive-recompute, aggregation-cap, and notification-idempotency
+decisions this phase made explicit.
+
+**Phase 7 (this commit): Streamlit dashboard.** Read-only, enforced at the
+transaction level (`SET TRANSACTION READ ONLY`), with every chart's full
+configuration — model, date range, feature, test method, segment, window,
+metric — carried in the URL query string, so a chart can be regenerated
+identically from its link alone. See "Dashboard" below for the
+three-state-rendering, deterministic-color, and SQL-aggregation decisions
+this phase made explicit.
 
 ## Statistical methods
 
@@ -445,6 +453,115 @@ re-derived from what it actually gates on, not carried over.
 The right choice depends on how fast the underlying population can actually
 shift and how expensive a false alarm is versus a missed one — not on a
 fixed rule of thumb.
+
+## Dashboard
+
+`src/driftwatch/dashboard/app.py` is a read-only Streamlit app
+(`streamlit run src/driftwatch/dashboard/app.py`, or the `dashboard` service
+in `docker-compose.yml`) built entirely on the tables the evaluation
+pipeline already writes — `drift_results`, `performance_results`, `alerts`,
+`evaluation_windows` — never on raw `predictions`/`labels`.
+
+- **Read-only is enforced by Postgres, not just by "we didn't write an
+  INSERT."** `driftwatch.dashboard.db.read_only_session` issues `SET
+  TRANSACTION READ ONLY` as the first statement of every session and never
+  commits, so an accidental write anywhere in the dashboard raises
+  immediately at the database rather than silently succeeding.
+- **A chart's URL is its full specification.** Model, date range, feature,
+  test method, segment, window, metric, and view all live in
+  `st.query_params` (see `driftwatch.dashboard.state`), not
+  `st.session_state` — the same link reopened months later reproduces the
+  same chart. The default date range itself comes from `MIN(window_start)`/
+  `MAX(window_end)` in `evaluation_windows` for the selected model
+  (`queries.default_time_range`), never `datetime.now()`.
+- **Three states, always distinguishable, never a silent gap.** Every
+  drift/performance chart LEFT JOINs the full grid of (window x signal)
+  against whatever result rows actually exist: `computed` (a real value,
+  colored breach/normal), `not_computable` (an explicit attempt was
+  recorded with a reason, shown on hover, rendered as a triangle in its own
+  lane below the chart's zero line), `not_configured` (the window WAS
+  evaluated, but not this exact signal — a test not in the profile's
+  configured methods for this feature's dtype, or a segment value with
+  zero live predictions that window — a grey diamond in a second lane),
+  and `missing` (rendered as a black cross in a third lane). None of the
+  three "empty" states ever just breaks the line and silently disappears.
+- **`missing` is its own state, deliberately the most alarming one on the
+  chart, and is never conflated with `not_configured`.** A window that was
+  never evaluated at all (scheduler downtime, a gap in a historical
+  backfill) is a completely different fact from a window that WAS
+  evaluated and simply had nothing configured to say about this signal —
+  the dashboard reconciles the actual EvaluationWindow rows against the
+  full EXPECTED window grid for the visible range
+  (`driftwatch.dashboard.queries._expected_window_grid`, built from the
+  same `driftwatch.scheduler.windowing.compute_window_boundaries` the real
+  scheduler and CLI backfill use, so "what windows should exist" is never
+  reimplemented a second time) rather than just listing whatever
+  EvaluationWindow rows happen to exist. Without this, a genuinely missing
+  window contributes zero rows to the chart's data and the line connecting
+  its neighbors draws straight across the gap with no break and no marker
+  — indistinguishable from uninterrupted quiet monitoring, which is the
+  most dangerous confusion a monitoring dashboard can produce. This
+  applies to the drift timeline, segment view, and performance timeline
+  alike.
+- **Thresholds are reference lines with values, not just a color.** Every
+  drift and performance chart draws its fire and clear thresholds as
+  labelled dashed rules, positioned by the actual visible time domain
+  (`driftwatch.dashboard.charts._threshold_rules` anchors the label to the
+  rightmost timestamp in view via the chart's own temporal scale) rather
+  than a hardcoded pixel offset, which — found out the hard way — is not
+  reliably inside a chart whose declared width includes axis-label space
+  Vega-Lite subtracts from the actual drawable plot.
+- **Every temporal encoding is explicitly UTC.** Vega-Lite's default
+  temporal scale renders axis ticks (and a tooltip's formatted timestamp)
+  in the *viewer's browser timezone*, not the data's own — since every
+  timestamp in this project is UTC (`driftwatch.db.models`), left
+  unpinned, the identical chart would render different x-axis tick labels
+  depending on where it's opened, which breaks this project's own
+  "same data produces a pixel-identical chart on every run" requirement.
+  `driftwatch.dashboard.charts._utc_x` / `_utc_tooltip` force `scale=utc`
+  and a `utc:`-prefixed format string everywhere a `:T` field is encoded.
+- **Color is a hash of the name, not the row's position.** Feature and
+  segment colors come from `driftwatch.dashboard.colors.stable_color`, an
+  `md5`-based hash — not Python's built-in `hash()`, which is
+  process-randomized for strings unless `PYTHONHASHSEED` is pinned, and
+  would silently break "the same feature is always the same color" across
+  restarts. A feature's color is identical whether it's the only one
+  plotted or one of ten.
+- **The segment view shares one y-scale across every facet.** Global and
+  each segment value are laid out as Vega-Lite facets of one chart, with
+  the y-domain computed once from the *entire* multi-segment frame before
+  faceting (`charts._with_plot_columns`) rather than per facet — otherwise
+  a facet with a much larger statistic would silently rescale its own
+  panel and no longer be visually comparable to the others in the same row.
+- **Suppressed alerts are a genuine replay, not a separate calculation.**
+  The "suppressed (never reached persistence)" table reuses
+  `driftwatch.alerting.streaks.classify_drift`/`classify_performance` — the
+  exact functions the real alerting engine calls — against date-bounded
+  history, so this view can never quietly drift from what the engine would
+  actually have decided. The grouping into episodes
+  (`driftwatch.alerting.reporting.find_suppressed_episodes`) is a small,
+  independently unit-tested pure function.
+- **Alert history shows and filters by the data's own time only — never
+  wall-clock evaluation time.** `Alert.first_opened_at`/`escalated_at`/
+  `resolved_at`/`last_seen_at` record when the evaluation run actually
+  happened in real time — correct for what they're for (notification
+  currency), but a historical backfill evaluates a whole date range of
+  windows in one fast burst "now", which would put today's date in every
+  one of those columns right next to a data event from months earlier,
+  with nothing in the table telling a reader the two apart. The table
+  never surfaces those four columns at all: `fetch_alert_history` instead
+  joins `evidence_window_id` / `escalation_evidence_window_id` /
+  `last_seen_window_id` to `evaluation_windows` and returns
+  `opened_window_start`/`opened_window_end`/`escalated_window_end`/
+  `last_seen_window_end` — self-describing column names, all on the same
+  time axis as every chart around them, and also what the range filter
+  itself uses.
+- **Known limitation, stated rather than engineered around:** this
+  connects with the same application database role as the rest of the
+  service, not a dedicated read-only role or replica — the transaction-level
+  guard above is what actually makes "no writes" true regardless, and
+  provisioning a separate role is real infra work a later phase (or a real
+  deployment) would do, not a gap in this phase's read-only guarantee.
 
 ## Running locally
 

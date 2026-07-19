@@ -46,10 +46,13 @@ services:
     build:
       context: .
       dockerfile: docker/dashboard.Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://driftwatch:driftwatch@postgres:5432/driftwatch
     ports:
       - "8501:8501"
     depends_on:
-      - api
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
