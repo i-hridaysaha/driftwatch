@@ -11,7 +11,7 @@ database (`driftwatch demo-verify concept_drift`); they are pinned below
 with their provenance and are the only typed numbers in this file. The
 test count is read from `pytest --collect-only` at render time.
 
-Written with the portfolio's figure kit (`theme.py`, copied unchanged from
+Written with the portfolio's figure kit (`theme.py`, copied from
 `05 FIGURE SYSTEM.md`): PNG at 200 DPI, one emphasised block per diagram,
 arrows above nodes, no em dashes and no arrow glyphs in figure text.
 """
@@ -29,7 +29,7 @@ os.environ.setdefault("CONFIGS_DIR", "configs")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np  # noqa: E402
-from matplotlib.patches import Circle, Rectangle  # noqa: E402
+from matplotlib.patches import Circle  # noqa: E402
 from theme import (  # noqa: E402
     BAND,
     BAND2,

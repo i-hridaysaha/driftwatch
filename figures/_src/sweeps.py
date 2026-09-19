@@ -26,6 +26,8 @@ from collections import defaultdict
 os.environ.setdefault("CONFIGS_DIR", "configs")
 
 
+import numpy as np  # noqa: E402
+
 from driftwatch.demo.generator import generate_scenario_data  # noqa: E402
 from driftwatch.demo.loader import load_scenario  # noqa: E402
 from driftwatch.stats.binning import compute_continuous_edges  # noqa: E402
@@ -183,8 +185,35 @@ def share_magnitude_sweep() -> None:
             )
 
 
+def trace_before() -> None:
+    """The segment scenario at its shipped seed and its pre-v1.0.0 geometry
+    (500 predictions a window against a 1500-row baseline), PSI gated
+    regardless of its floor: what the first draft of the case study was
+    standing on."""
+    base = load_scenario("segment_isolated")
+    scenario = base.model_copy(update={"predictions_per_window": 500, "baseline_size": 1500})
+    event = scenario.events[0]
+    shift = (event.start_window, event.start_window + (event.duration_windows or 0))
+    for method, (fire, clear) in (("PSI", (PSI_FIRE, PSI_CLEAR)), ("KS D", (KS_FIRE, KS_CLEAR))):
+        psi_vals, ks_vals, _ = traces(scenario, "age", "APAC", ignore_floor=True)
+        vals = psi_vals if method == "PSI" else ks_vals
+        quiet = [v for v in vals[: shift[0]] if v is not None]
+        after = "".join(classify(v, fire, clear) for v in vals[shift[1] :])
+        resolves = "c" * 5 in after
+        print(
+            f"# {method}, APAC age, seed {scenario.seed}, {scenario.predictions_per_window} a "
+            f"window: quiet-window mean {np.mean(quiet):.3f}, "
+            f"{sum(v >= fire for v in quiet)} of {len(quiet)} quiet windows breach, "
+            f"{sum(v <= clear for v in quiet)} of {len(quiet)} read clear, "
+            f"peak {max(v for v in vals if v is not None):.2f}, "
+            f"resolves after the shift: {'yes' if resolves else 'no'} ({after})"
+        )
+
+
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    if which in ("all", "trace-before"):
+        trace_before()
     if which in ("all", "clean"):
         false_open_sweep()
     if which in ("all", "clean-before"):

@@ -1,9 +1,10 @@
 """Visual theme, z-order contract, and drawing primitives for case-study figures."""
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Rectangle, Circle
 from matplotlib import font_manager as fm
+from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
 
 # ---- palette (mirrors the site design tokens; see Wix/Homepage/theme) ----
 INK       = "#0F0E0E"   # --ink, near-black text

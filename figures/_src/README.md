@@ -7,7 +7,7 @@ The case study's figures, drawn from the repository rather than typed.
 
 | File | Job |
 |---|---|
-| `theme.py` | the portfolio figure kit's palette, z-order contract and primitives, copied unchanged |
+| `theme.py` | the portfolio figure kit's palette, z-order contract and primitives, copied from the kit with its imports tidied for this repository's linter |
 | `figures.py` | one function per figure; the segment chart is recomputed window by window from `driftwatch.demo.generator` with `driftwatch.stats`, the test count comes from `pytest --collect-only`, and the three performance numbers are pinned with their `demo-verify` provenance |
 | `sweeps.py` | forty clean seeds at the segment geometry (spurious opens per signal), the same at the pre-v1.0.0 geometry with PSI gated regardless of its floor, and a segment-share against shift-magnitude sweep |
 
