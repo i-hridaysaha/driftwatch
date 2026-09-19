@@ -1,6 +1,10 @@
 import math
 
-from driftwatch.stats.psi import EPSILON, psi
+import numpy as np
+import pytest
+
+from driftwatch.stats.binning import compute_continuous_edges
+from driftwatch.stats.psi import EPSILON, psi, psi_null_floor
 from driftwatch.stats.result import StatStatus
 
 EDGES = [1.0, 2.0, 3.0]  # 2 interior bins -> 4 buckets: under, (1,2], (2,3], over
@@ -105,3 +109,43 @@ def test_is_pure_and_deterministic() -> None:
 
     assert first == second
     assert baseline == [0.5, 1.5, 2.5, 2.9]  # inputs untouched
+
+
+def test_null_floor_matches_the_chi_square_approximation() -> None:
+    """(B - 1) k for the mean and sqrt(2 (B - 1)) k for the sd, with
+    k = 1/n_baseline + 1/n_live -- Yurdakul (2018)."""
+    floor = psi_null_floor(n_baseline=225, n_live=75, n_buckets=12)
+    k = 1 / 225 + 1 / 75
+    assert floor.mean == pytest.approx(11 * k)
+    assert floor.sd == pytest.approx(math.sqrt(22) * k)
+    assert floor.ceiling == pytest.approx(floor.mean + 2 * floor.sd)
+    # the segment geometry the case study was first published on: the
+    # ceiling sits above the patient profile's 0.25 fire threshold
+    assert floor.ceiling > 0.25
+
+
+def test_null_floor_matches_simulation_when_bins_are_populated() -> None:
+    """Empirical check with the real psi() on same-distribution samples at
+    a volume where every interior bin is populated, so the asymptotic
+    approximation should be close: mean within 25 percent."""
+    rng = np.random.default_rng(0)
+    values = []
+    for _ in range(400):
+        base = rng.normal(40, 12, 600).tolist()
+        live = rng.normal(40, 12, 210).tolist()
+        edges = compute_continuous_edges(base)
+        result = psi(base, live, edges)
+        assert result.value is not None
+        values.append(result.value)
+    empirical_mean = float(np.mean(values))
+    predicted = psi_null_floor(600, 210, 12).mean
+    assert abs(empirical_mean - predicted) / predicted < 0.25
+
+
+def test_null_floor_shrinks_with_volume_and_is_infinite_for_empty_samples() -> None:
+    small = psi_null_floor(225, 75, 12)
+    large = psi_null_floor(900, 300, 12)
+    assert large.ceiling < small.ceiling
+    assert large.ceiling < 0.15  # the volume the segment scenario ships at
+    assert math.isinf(psi_null_floor(0, 75, 12).ceiling)
+    assert math.isinf(psi_null_floor(225, 75, 1).ceiling)

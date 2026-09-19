@@ -23,7 +23,7 @@ from driftwatch.stats.chi_square import chi_square
 from driftwatch.stats.correction import benjamini_hochberg
 from driftwatch.stats.jsd import jsd
 from driftwatch.stats.ks import ks
-from driftwatch.stats.psi import psi
+from driftwatch.stats.psi import PSIResult, psi, psi_null_floor
 from driftwatch.stats.result import StatStatus
 
 PREDICTION_SCORE_FEATURE_NAME = "__prediction_score__"
@@ -263,7 +263,12 @@ def _evaluate_feature(
         live_floats = [float(v) for v in live_present]
         for method in profile.drift_tests.continuous.methods:
             if method == "psi":
-                psi_result = psi(baseline_floats, live_floats, edges)
+                psi_result = _psi_or_below_floor(
+                    baseline_floats,
+                    live_floats,
+                    edges,
+                    profile.drift_tests.continuous.psi_clear_threshold,
+                )
                 results.append(
                     _make_drift_result(
                         window,
@@ -332,6 +337,47 @@ def _evaluate_feature(
                 )
             )
     return results
+
+
+def _psi_or_below_floor(
+    baseline_floats: list[float],
+    live_floats: list[float],
+    edges: list[float],
+    clear_threshold: float,
+) -> PSIResult:
+    """PSI, unless this pair of sample sizes is too small for the profile's
+    clear threshold to mean anything -- in which case NOT_COMPUTABLE with
+    the reason, never a number.
+
+    Under no shift at all, PSI reads sampling noise that grows as the
+    samples shrink (driftwatch.stats.psi.psi_null_floor). If that noise
+    ceiling sits above the clear threshold, a perfectly quiet segment
+    cannot reliably classify as "clear": it lives in the dead zone or
+    breaches on noise, an alert on it can never assemble the run of clear
+    windows resolution needs, and a fire threshold near the ceiling opens
+    alerts on nothing. Gating on such a number would be exactly the
+    flapping the hysteresis exists to prevent, so it is refused here, with
+    a reason a reader can act on (more rows per window, wider windows, or
+    a wider clear threshold). min_window_size / min_segment_size are floors
+    on whether a statistic can be computed at all; this is the floor on
+    whether PSI is worth gating on, and it depends on the threshold."""
+    if not baseline_floats or not live_floats or not edges:
+        return psi(baseline_floats, live_floats, edges)
+    n_buckets = len(edges) + 1  # interior bins plus the two overflow buckets
+    floor = psi_null_floor(len(baseline_floats), len(live_floats), n_buckets)
+    if floor.ceiling > clear_threshold:
+        return PSIResult(
+            status=StatStatus.NOT_COMPUTABLE,
+            value=None,
+            not_computable_reason=(
+                f"PSI sampling-noise ceiling {floor.ceiling:.3f} (null mean "
+                f"{floor.mean:.3f} at {len(baseline_floats)} baseline vs "
+                f"{len(live_floats)} live rows, {n_buckets} buckets) exceeds the "
+                f"clear threshold {clear_threshold}; a quiet window could not "
+                f"reliably read as clear, so PSI is not gated on at this volume"
+            ),
+        )
+    return psi(baseline_floats, live_floats, edges)
 
 
 def _evaluate_prediction_score(
@@ -429,6 +475,8 @@ def _evaluate_all_features(
                     f"{model_config.segments.min_segment_size}"
                 )
                 for feature in model_config.schema_.features:
+                    if feature.name == dimension:
+                        continue
                     for method in _configured_methods(feature, profile):
                         results.append(
                             _make_drift_result(
@@ -459,6 +507,14 @@ def _evaluate_all_features(
                 continue
 
             for feature in model_config.schema_.features:
+                if feature.name == dimension:
+                    # Every row in the region='EU' segment has region == 'EU'
+                    # by construction, so drift on the segment-defining
+                    # feature inside its own segment can only ever be "one
+                    # category": not a signal, not even a not_computable
+                    # one. No row is written, and the dashboard renders the
+                    # slot as not_configured -- which it is.
+                    continue
                 results.extend(
                     _evaluate_feature(
                         window,

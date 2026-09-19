@@ -1,9 +1,21 @@
 # The shift only ever applies to the APAC segment (15% of traffic), with
 # a finite duration so it fires and later resolves. Region weights and
-# predictions_per_window are tuned (see the demo-verify assertions) so the
+# the shift magnitude are tuned (see the demo-verify assertions) so the
 # global aggregate never crosses the fire threshold even while APAC's own
 # local statistic breaches badly -- this is verified numerically after
 # generation, not assumed.
+#
+# Volume is tuned for a different reason. At 500 predictions per window
+# APAC saw about 75 rows against a 225-row baseline slice, and PSI's
+# sampling-noise floor at that volume (null mean about 0.20, ceiling
+# about 0.36 -- see driftwatch.stats.psi.psi_null_floor) sat ABOVE the
+# patient profile's 0.25 fire threshold: the quiet windows breached on
+# noise one window in four, and after the shift ended the PSI alert could
+# never assemble the five clear windows resolution needs, so it stayed
+# escalated for good while the KS alert resolved. At 2000 per window
+# against a 6000-row baseline APAC sees about 300 rows against 900, the
+# ceiling drops to about 0.09, comfortably under the 0.15 clear threshold,
+# and the evaluation pipeline would refuse to gate on PSI otherwise.
 name: segment_isolated
 description: >
   A shift confined to a single segment (region=APAC, 15% of traffic).
@@ -17,8 +29,8 @@ start_date: "2026-01-01T00:00:00Z"
 window: "1h"
 stable_windows: 32
 total_windows: 55
-predictions_per_window: 500
-baseline_size: 1500
+predictions_per_window: 2000
+baseline_size: 6000
 prediction_type: binary_classification
 prediction_distribution: {type: beta, a: 0.4, b: 0.4}
 

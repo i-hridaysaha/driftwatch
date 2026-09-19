@@ -23,10 +23,10 @@ detected exactly that fault — and nothing else.
 
 | Scenario | Injected fault | Expected outcome | Verified |
 |---|---|---|---|
-| `clean` | none | no alerts | ✅ no false positives |
-| `covariate_shift` | global input-distribution shift | drift alert fires | ✅ |
-| `segment_isolated` | shift confined to one segment (APAC) | segment alert fires, global stays quiet | ✅ |
-| `concept_drift` | label noise; inputs stable, only visible after labels backfill | PR-AUC degrades and escalates | ✅ |
+| `clean` | none | no alerts | ✅ no alerts, zero significant readings |
+| `covariate_shift` | global input-distribution shift | drift alert fires; a one-window blip does not | ✅ |
+| `segment_isolated` | shift confined to one segment (APAC, 15% of traffic) | both segment alerts open, escalate and resolve; global stays quiet | ✅ global max 0.042, segment max 1.23 |
+| `concept_drift` | label noise; inputs stable, only visible after labels backfill | PR-AUC degrades and escalates | ✅ 0.874 before, 0.386 after |
 
 > **Data note:** every number here comes from *synthetic, staged* scenarios
 > against a real Postgres — not a benchmark. Parameters were tuned to produce
@@ -39,8 +39,9 @@ Real `demo-verify` output (this run, printed by CI on every push):
 ```
 $ driftwatch demo-verify segment_isolated
 [PASS] no unexpected alerts: none
-[PASS] global age PSI stays under the fire threshold throughout: max=0.094, fire_threshold=0.25
-[PASS] APAC segment breaches, fires, and (once the shift ends) resolves: ['escalated', 'resolved']
+[PASS] global age PSI stays under the fire threshold throughout: max=0.042, fire_threshold=0.25
+[PASS] APAC age psi alert opens, escalates, and (once the shift ends) resolves: status=resolved, opened at 1.188, escalated at 1.122
+[PASS] APAC age ks alert opens, escalates, and (once the shift ends) resolves: status=resolved, opened at 0.418, escalated at 0.429
 
 $ driftwatch demo-verify concept_drift
 [PASS] no feature or prediction-score drift (inputs stay stable): none
@@ -49,8 +50,24 @@ $ driftwatch demo-verify concept_drift
 [PASS] degradation only visible after backfill: 57 windows initially not_computable for lack of labels
 ```
 
-Regenerating any scenario reproduces `early_mean`/`late_mean` to the last
-digit — that is what "deterministic" means here in practice.
+Regenerating any scenario reproduces every number above to the last digit;
+that is what "deterministic" means here in practice. Two cheaper experiments
+that need no database live in `figures/_src/sweeps.py`: forty clean seeds at
+the segment scenario's geometry open zero spurious alerts on either PSI or
+KS, and a sweep of segment share against shift magnitude shows where the
+global reading stays quiet while the segment fires.
+
+Before v1.0.0 the segment scenario ran at 500 predictions a window, which
+gave the 15% segment about 75 rows against a 225-row baseline slice. At
+that volume PSI's own sampling noise (null mean about 0.20; see
+`driftwatch.stats.psi.psi_null_floor`) sat in the dead zone between the
+patient profile's 0.15 clear and 0.25 fire thresholds: the segment breached
+on noise one quiet window in four, and after the shift ended its PSI alert
+could never assemble five clear windows, so it stayed escalated while the KS
+alert resolved. The verifier of the time passed on the union of the two.
+The verifier now checks each alert's whole journey, the evaluation pipeline
+refuses to gate on PSI where its noise ceiling exceeds the clear threshold,
+and the scenario ships at 2000 a window.
 
 ## Why this is non-trivial
 
@@ -62,15 +79,30 @@ digit — that is what "deterministic" means here in practice.
 - **Effect size drives alerts, never the p-value.** At production window
   sizes a p-value testing "are these two samples identical" is essentially
   always significant regardless of whether the shift matters. Alerting gates
-  on KS D-statistic, Cramér's V, PSI, and JSD (all bounded, sample-size
-  independent); p-values are reported for context only.
+  on the KS D-statistic, Cramér's V and JSD (each in [0, 1]) and on PSI
+  (unbounded); a real shift of a given size reads the same on any of them
+  whatever the window size. p-values are stored for context only, and
+  Benjamini-Hochberg correction of them is informational: it never decides
+  what fires.
+- **Effect sizes are stable as volume grows, not as it shrinks.** Under no
+  shift at all PSI reads sampling noise of roughly (bins − 1)(1/n_baseline +
+  1/n_live), which at a few dozen rows sits above every fire threshold
+  shipped here. The pipeline computes that floor per window and refuses to
+  gate on PSI where the floor's ceiling exceeds the profile's clear
+  threshold, recording the row as `not_computable` with the reason rather
+  than as a number that would flap.
 - **Segment-level drift, not just global.** Aggregate stats hide a failure
   confined to one geography or category. `segment_isolated` proves a
-  15%-weighted segment can breach while the global metric stays quiet.
+  15%-weighted segment can breach while the global metric stays quiet. A
+  categorical feature is never tested inside a segment defined by that same
+  feature: every row in `region=EU` has `region == EU`, so that slot is
+  `not_configured`, not a permanent `not_computable` alert.
 - **Alert fatigue is treated as a design failure.** Hysteresis (separate fire
-  and clear thresholds), consecutive-window persistence gates, and
-  Benjamini-Hochberg correction scoped to one model × one window keep a
-  boundary-hugging statistic from flapping.
+  and clear thresholds, with the gap between them a dead zone that breaks a
+  streak in either direction) and consecutive-window persistence gates for
+  opening, escalating and resolving keep a boundary-hugging statistic from
+  flapping. Persistence is the only control on the roughly two dozen
+  effect-size gates a window evaluates.
 - **`not_computable` is never a silent gap.** A metric that is mathematically
   undefined for a window (e.g. `roc_auc` when every label so far is one class)
   is recorded with a reason and rendered as an explicit marker — a missing
@@ -79,17 +111,20 @@ digit — that is what "deterministic" means here in practice.
 
 ## Approach
 
+![Predictions, labels and baseline registrations enter through one FastAPI endpoint into an append-only Postgres store. A scheduler drives the drift path, label ingestion drives the performance path, both feed an alert state machine, results and alert rows are written back to the store, notifications leave on status transitions, and a read-only dashboard reads the store directly.](figures/03_architecture.png)
+
 ```
-model → POST predictions/labels (FastAPI) → Postgres (append-only, keyed on prediction_id)
+model → POST predictions / labels / baseline (FastAPI, schema-validated) → Postgres (append-only)
                                                       │
-     scheduler windows by event time ────────────────┤
-                                                      ▼
-   drift core: PSI · KS · chi-square · JSD + BH correction   (pure, deterministic)
-   performance: pr_auc / precision / recall / rmse / mae      (once labels arrive)
+     scheduler windows by event time ────────────────┤──── label ingestion, per touched window
+                                                      ▼                          ▼
+   drift path: PSI · KS · chi-square · JSD, sealed once    performance path: pr_auc / precision / recall
+                                                      │                          │
+                        stateful alerting (open → escalated → resolved, hysteresis, dead zone)
                                                       │
-                        stateful alerting (open → escalated → resolved, hysteresis)
-                                                      │
-                              read-only Streamlit dashboard (URL = full chart spec)
+                  drift results, performance results and alert rows written back to Postgres
+                        │                                              │
+        notifications (log, webhook; on transition, no retry)     read-only dashboard (reads Postgres)
 ```
 
 Per-model behaviour — feature schema, drift thresholds, segments, alert
@@ -148,7 +183,14 @@ docker compose up --build
 Full test suite (needs a Postgres reachable at `DATABASE_URL`):
 
 ```bash
-uv run pytest      # 204 passed
+uv run pytest      # 209 passed
+```
+
+Redraw the case study's figures from the generator and the repository's
+own statistics (no database needed; `matplotlib` is pulled in for the run):
+
+```bash
+uv run --with matplotlib python figures/_src/figures.py
 ```
 
 ## Repo map
@@ -166,7 +208,8 @@ src/driftwatch/
   db/, config/  SQLAlchemy models · YAML profile/model loader
 configs/        profiles/ · models/ · scenarios/
 alembic/        migrations
-tests/          43 files, 204 tests
+tests/          31 test files, 209 tests
+figures/        the case study's figures and the script that draws them from the generator
 ```
 
 ## Limitations & next steps
@@ -181,7 +224,22 @@ tests/          43 files, 204 tests
   liveness check has no DB dependency, so it doesn't exercise migrations.
 - **Notifications ship as logging + generic webhook only** — Slack/email are
   thin adapters a real deployment builds on a webhook receiver, deliberately
-  not special-cased here.
+  not special-cased here. Delivery is fire-and-forget on a status transition:
+  a failed webhook is recorded on the alert row (`last_notification_error`)
+  and not retried.
+- **Label ingestion recomputes synchronously.** `POST /labels` recomputes
+  performance, re-runs the alert engine and calls the notification channels
+  for every window the batch touches, inside the request. A backfill of a
+  month of hourly windows does all of that in one request; a queue is the
+  obvious next step and is not built.
+- **No authentication.** The ingestion and baseline endpoints are open, and
+  registering a baseline deactivates the current one, so anything that can
+  reach the API can change what drift is measured against.
+- **No model version column.** `config_hash` on every window makes a profile
+  change detectable after the fact; a retrained model behind the same
+  `model_id` is not.
+- **The aggressive profile is not exercised by a shipped scenario.** All four
+  scenarios run under `patient`; `aggressive` is covered by unit tests only.
 
 Deeper methodology (statistical-choice rationale, alerting lifecycle, dashboard
 state model) lives in the [case study](https://www.hridaysaha.com/projects-1/drift-watch%3A-ml-model-monitoring-service).

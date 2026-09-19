@@ -54,6 +54,10 @@ extend-exclude = ["alembic/versions"]
 select = ["E", "F", "I", "UP", "B", "SIM", "N"]
 ignore = ["B008"]  # FastAPI's Depends()-as-default is the documented idiom
 
+[tool.ruff.lint.per-file-ignores]
+# the figure kit's own idiom: uppercase geometry constants and one-line palettes
+"figures/_src/*" = ["N802", "N806", "E702"]
+
 [tool.mypy]
 python_version = "3.11"
 mypy_path = "src"

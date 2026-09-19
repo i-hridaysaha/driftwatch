@@ -55,33 +55,16 @@ def _identity(alert: Alert) -> AlertIdentity:
     )
 
 
-def _is_structural_self_segment_alert(alert: Alert) -> bool:
-    """A categorical feature evaluated for drift WITHIN a segment defined by
-    that same feature is structurally degenerate: every row in, say, the
-    region='EU' segment has region=='EU' by construction, so chi-square can
-    never see more than one category and always reports not_computable.
-    This is an inherent property of driftwatch.evaluation.drift's
-    "evaluate every declared feature at every segment level, including the
-    segment-defining feature itself" design (see _evaluate_all_features) --
-    not a scenario bug -- so every scenario that segments by a feature it
-    also monitors (all four shipped ones do, since the real ingestion API
-    requires segment dimensions to be declared features too) hits this for
-    every segment value. Excluded from every "no unexpected alerts" check,
-    not special-cased per scenario."""
-    return (
-        alert.kind == AlertKind.NOT_COMPUTABLE
-        and alert.signal_name == TestMethod.CHI_SQUARE.value
-        and alert.feature_name is not None
-        and alert.feature_name == alert.segment_dimension
-    )
-
-
 def _unexpected_alerts(alerts: list[Alert], expected: set[AlertIdentity]) -> list[Alert]:
-    return [
-        alert
-        for alert in alerts
-        if not _is_structural_self_segment_alert(alert) and _identity(alert) not in expected
-    ]
+    """Every alert row the run wrote that the scenario did not claim. Nothing
+    is excluded: an earlier version filtered out the permanently-open
+    not_computable alerts the engine raised on a categorical feature
+    evaluated inside a segment defined by that same feature, which meant
+    "no unexpected alerts" was true only after ignoring three alerts a real
+    deployment would have seen. That structural signal is no longer
+    evaluated (see driftwatch.evaluation.drift._evaluate_all_features), so
+    the check is now exactly what its name says."""
+    return [alert for alert in alerts if _identity(alert) not in expected]
 
 
 def _describe(alerts: list[Alert]) -> str:
@@ -229,6 +212,18 @@ def _verify_covariate_shift(
     return checks
 
 
+def _describe_journey(matching: list[Alert]) -> str:
+    if len(matching) != 1:
+        return f"{len(matching)} alert rows"
+    alert = matching[0]
+    if alert.escalation_evidence_statistic is None or alert.evidence_statistic is None:
+        return f"status={alert.status.value}, never escalated"
+    return (
+        f"status={alert.status.value}, opened at {alert.evidence_statistic:.3f}, "
+        f"escalated at {alert.escalation_evidence_statistic:.3f}"
+    )
+
+
 def _verify_segment_isolated(
     session: Session, scenario: ScenarioConfig, profile: Profile
 ) -> list[Check]:
@@ -258,19 +253,33 @@ def _verify_segment_isolated(
         )
     )
 
-    apac_statuses = {
-        a.status
-        for a in alerts
-        if a.feature_name == "age" and a.segment_dimension == "region" and a.segment_value == "APAC"
-    }
-    checks.append(
-        Check(
-            "APAC segment breaches, fires, and (once the shift ends) resolves",
-            AlertStatus.RESOLVED in apac_statuses
-            and (AlertStatus.OPEN in apac_statuses or AlertStatus.ESCALATED in apac_statuses),
-            f"statuses seen for age/region=APAC: {sorted(s.value for s in apac_statuses)}",
+    # One check per expected alert, and each must have done the whole
+    # journey on its own: opened, escalated (the shift lasts longer than the
+    # escalate persistence count), and resolved once the shift ended. An
+    # earlier version passed if the SET of statuses across the PSI and KS
+    # alerts contained "resolved" and one of open/escalated -- which a run
+    # where the PSI alert never resolved (its sampling-noise floor at 75
+    # APAC rows per window sat in the dead zone) satisfied via the KS alert.
+    for test_method in (TestMethod.PSI, TestMethod.KS):
+        matching = [
+            a
+            for a in alerts
+            if a.signal_name == test_method.value
+            and a.feature_name == "age"
+            and a.segment_dimension == "region"
+            and a.segment_value == "APAC"
+        ]
+        alert = matching[0] if len(matching) == 1 else None
+        checks.append(
+            Check(
+                f"APAC age {test_method.value} alert opens, escalates, and (once the shift "
+                f"ends) resolves",
+                alert is not None
+                and alert.escalated_at is not None
+                and alert.status == AlertStatus.RESOLVED,
+                _describe_journey(matching),
+            )
         )
-    )
     return checks
 
 

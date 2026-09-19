@@ -272,7 +272,10 @@ def test_benjamini_hochberg_sets_corrected_p_value_only_where_applicable(
 def test_evaluate_window_opens_a_real_alert_end_to_end(db_session: Session) -> None:
     """Not a direct call into the alert engine -- proves the actual wiring
     through evaluate_window creates a real Alert row via the real
-    aggressive.yaml profile (fire_persistence_windows: 1)."""
+    aggressive.yaml profile (fire_persistence_windows: 1). The alert is the
+    KS one: at 60 baseline rows against 60 live rows PSI's sampling-noise
+    ceiling is far above aggressive's 0.07 clear threshold, so the PSI row
+    is (correctly) not_computable and cannot open anything."""
     _register_baseline(db_session)
     window_start = datetime(2026, 1, 1, tzinfo=UTC)
     window_end = window_start + timedelta(hours=1)
@@ -281,15 +284,104 @@ def test_evaluate_window_opens_a_real_alert_end_to_end(db_session: Session) -> N
     window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
     assert window is not None
 
+    psi_row = db_session.scalars(
+        select(DriftResult).where(
+            DriftResult.evaluation_window_id == window.id,
+            DriftResult.feature_name == "age",
+            DriftResult.test_method == TestMethod.PSI,
+            DriftResult.segment_dimension.is_(None),
+        )
+    ).one()
+    assert psi_row.status == MetricStatus.NOT_COMPUTABLE
+    assert psi_row.not_computable_reason is not None
+    assert "sampling-noise ceiling" in psi_row.not_computable_reason
+
     alert = db_session.scalars(
         select(Alert).where(
             Alert.model_id == MODEL_ID,
             Alert.kind == AlertKind.DRIFT,
             Alert.feature_name == "age",
-            Alert.signal_name == "psi",
+            Alert.signal_name == "ks",
         )
     ).one()
 
     assert alert.status == AlertStatus.OPEN
     assert alert.evidence_window_id == window.id
     assert alert.evidence_baseline_id == window.baseline_id
+
+
+def test_segment_defining_feature_is_not_evaluated_inside_its_own_segment(
+    db_session: Session,
+) -> None:
+    """Every row in the region='EU' segment has region == 'EU' by
+    construction, so a categorical drift test on `region` inside that
+    segment can only ever see one category. It used to be written as a
+    permanently not_computable row per segment, which opened a permanent
+    not_computable alert per segment value on every scenario. Now no row is
+    written at all: the dashboard renders the slot as not_configured."""
+    _register_baseline(db_session, n=90)
+    window_start = datetime(2026, 1, 1, tzinfo=UTC)
+    window_end = window_start + timedelta(hours=1)
+    _add_predictions(db_session, window_start, 90)
+
+    window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
+    assert window is not None
+
+    self_segment_rows = db_session.scalars(
+        select(DriftResult).where(
+            DriftResult.evaluation_window_id == window.id,
+            DriftResult.feature_name == "region",
+            DriftResult.segment_dimension == "region",
+        )
+    ).all()
+    assert self_segment_rows == []
+
+    # the same feature is still evaluated globally, and the other features
+    # are still evaluated inside every segment
+    global_region = db_session.scalars(
+        select(DriftResult).where(
+            DriftResult.evaluation_window_id == window.id,
+            DriftResult.feature_name == "region",
+            DriftResult.segment_dimension.is_(None),
+        )
+    ).all()
+    assert len(global_region) == 1
+    age_in_segments = db_session.scalars(
+        select(DriftResult).where(
+            DriftResult.evaluation_window_id == window.id,
+            DriftResult.feature_name == "age",
+            DriftResult.segment_dimension == "region",
+        )
+    ).all()
+    assert {r.segment_value for r in age_in_segments} == set(REGIONS)
+
+
+def test_psi_is_refused_below_its_sampling_noise_floor_and_ks_is_not(db_session: Session) -> None:
+    """At 60 baseline rows against 60 live rows, PSI's null ceiling with 12
+    buckets is about 0.68 -- an order of magnitude above the aggressive
+    profile's 0.07 clear threshold -- so gating on it would flap. The row
+    is written as not_computable with the reason; KS on the same samples
+    is computed as normal."""
+    _register_baseline(db_session)
+    window_start = datetime(2026, 1, 1, tzinfo=UTC)
+    window_end = window_start + timedelta(hours=1)
+    _add_predictions(db_session, window_start, 60)
+
+    window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
+    assert window is not None
+
+    rows = {
+        r.test_method: r
+        for r in db_session.scalars(
+            select(DriftResult).where(
+                DriftResult.evaluation_window_id == window.id,
+                DriftResult.feature_name == "age",
+                DriftResult.segment_dimension.is_(None),
+            )
+        ).all()
+    }
+    assert rows[TestMethod.PSI].status == MetricStatus.NOT_COMPUTABLE
+    assert rows[TestMethod.PSI].statistic is None
+    assert rows[TestMethod.PSI].not_computable_reason is not None
+    assert "clear threshold 0.07" in rows[TestMethod.PSI].not_computable_reason
+    assert rows[TestMethod.KS].status == MetricStatus.COMPUTED

@@ -14,8 +14,13 @@ start_date: "2026-01-01T00:00:00Z"
 window: "1h"
 stable_windows: 32
 total_windows: 90
-predictions_per_window: 500
-baseline_size: 1500
+# 700 per window against a 2000-row baseline, the same volume as clean and
+# concept_drift: at 500/1500 the 30% APAC segment saw about 150 rows against
+# 450, where PSI's sampling-noise ceiling (about 0.18, see
+# driftwatch.stats.psi.psi_null_floor) exceeds the patient profile's 0.15
+# clear threshold and PSI is refused as not_computable for that segment.
+predictions_per_window: 700
+baseline_size: 2000
 prediction_type: binary_classification
 prediction_distribution: {type: beta, a: 0.4, b: 0.4}
 
