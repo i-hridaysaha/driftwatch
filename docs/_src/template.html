@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>driftwatch demo</title>
+<meta name="description" content="Interactive walkthrough of driftwatch's five seeded fault scenarios: per-window charts, a replayable alert lifecycle, dashboard screenshots and verifier output from one real run.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="driftwatch demo">
+<meta property="og:description" content="Five staged faults, one verifier. Hover any window, replay the run, watch the alert state machine decide.">
+<meta property="og:url" content="https://i-hridaysaha.github.io/driftwatch/">
+<meta property="og:image" content="https://i-hridaysaha.github.io/driftwatch/figures/00_hero.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230F0E0E'/%3E%3Cpath d='M5 21 L11 21 L14 11 L18 24 L21 17 L27 17' fill='none' stroke='%23FF5701' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --paper:#FBFBF7; --card:#FFFFFF; --surface:#F0EFE9; --surface-2:#E8E6DE;
+  --ink:#0F0E0E; --body:#2B2A2A; --mute:#5A5A5A; --faint:#8F8B83;
+  --line:#D2D0C8; --line-d:#B9B7AE;
+  --volt:#FF5701; --volt-txt:#8A3200; --volt-soft:#FFE7D8; --volt-edge:#FFB88F;
+  --blue:#4F86C6; --blue-soft:#EAF1F8; --blue-txt:#2F5F9A;
+  --red:#B3261E; --red-soft:#F9E4E3;
+  --green:#1E8E4A; --green-soft:#E4F1E8;
+  --amber:#B9770E; --amber-soft:#FBEFD9;
+  --band:#0E0D0D; --band-2:#1A1917; --band-text:#F0EFE9; --band-mute:#9C978C; --band-green:#6CD28F;
+  --shadow:0 1px 0 rgba(15,14,14,.04), 0 8px 24px -16px rgba(15,14,14,.25);
+  --display:"Archivo","Helvetica Neue",Helvetica,Arial,sans-serif;
+  --text:"Source Sans 3","Source Sans Pro","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0E0D0D; --card:#1A1917; --surface:#232220; --surface-2:#2C2A27;
+    --ink:#F4F2EC; --body:#D9D6CE; --mute:#A39F96; --faint:#7A766E;
+    --line:#2E2C29; --line-d:#3F3C38;
+    --volt:#FF5701; --volt-txt:#FF7A3D; --volt-soft:#3A1E10; --volt-edge:#7A3A15;
+    --blue:#6FA0DA; --blue-soft:#16222F; --blue-txt:#8FB8E8;
+    --red:#E0655C; --red-soft:#3A1A18;
+    --green:#4DB374; --green-soft:#14291C;
+    --amber:#E0A030; --amber-soft:#332611;
+    --band:#050505; --band-2:#141312; --band-text:#F0EFE9; --band-mute:#8E897F; --band-green:#6CD28F;
+    --shadow:0 1px 0 rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0E0D0D; --card:#1A1917; --surface:#232220; --surface-2:#2C2A27;
+  --ink:#F4F2EC; --body:#D9D6CE; --mute:#A39F96; --faint:#7A766E;
+  --line:#2E2C29; --line-d:#3F3C38;
+  --volt:#FF5701; --volt-txt:#FF7A3D; --volt-soft:#3A1E10; --volt-edge:#7A3A15;
+  --blue:#6FA0DA; --blue-soft:#16222F; --blue-txt:#8FB8E8;
+  --red:#E0655C; --red-soft:#3A1A18;
+  --green:#4DB374; --green-soft:#14291C;
+  --amber:#E0A030; --amber-soft:#332611;
+  --band:#050505; --band-2:#141312; --band-text:#F0EFE9; --band-mute:#8E897F; --band-green:#6CD28F;
+  --shadow:0 1px 0 rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+}
+*{box-sizing:border-box}
+img{max-width:100%}
+[hidden]{display:none!important}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--body);font-family:var(--text);font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+@media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto} *{transition:none!important;animation:none!important} }
+a{color:var(--volt-txt);text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px}
+a:hover{color:var(--volt)}
+:focus-visible{outline:2px solid var(--volt);outline-offset:2px;border-radius:3px}
+.wrap{max-width:1080px;margin:0 auto;padding-inline:clamp(16px,4vw,40px)}
+h1,h2,h3{font-family:var(--display);color:var(--ink);letter-spacing:-.01em;text-wrap:balance;margin:0}
+h1{font-size:clamp(44px,7vw,76px);font-weight:800;line-height:.95;letter-spacing:-.03em}
+h2{font-size:clamp(22px,2.6vw,28px);font-weight:700;text-transform:uppercase;letter-spacing:.02em}
+h3{font-size:19px;font-weight:700}
+p{margin:0}
+.measure{max-width:64ch}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute)}
+.mono{font-family:var(--mono)}
+.num{font-variant-numeric:tabular-nums}
+code{font-family:var(--mono);font-size:.9em;background:var(--surface);padding:.05em .35em;border-radius:3px;color:var(--ink)}
+hr.rule{border:0;border-top:1px solid var(--line);margin:0}
+
+/* header */
+.hero{padding-block:clamp(36px,6vw,72px) clamp(28px,4vw,44px);display:grid;gap:22px}
+.hero .lede{font-size:clamp(19px,2.2vw,23px);line-height:1.45;color:var(--body);max-width:62ch}
+.hero-links{display:flex;flex-wrap:wrap;gap:10px 22px;font-size:15px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);margin-top:10px}
+.tile{background:var(--card);padding:16px 18px 14px;display:grid;gap:4px;align-content:start}
+.tile .v{font-family:var(--display);font-weight:700;font-size:30px;color:var(--ink);letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums;display:flex;align-items:baseline;gap:4px;white-space:nowrap}
+.tile .v small{font-size:15px;font-weight:500;color:var(--mute);letter-spacing:0;margin-left:2px}
+.tile .k{font-size:13.5px;color:var(--mute);line-height:1.3}
+.tile.accent .v{color:var(--volt-txt)}
+.provenance{display:flex;gap:10px;align-items:flex-start;font-size:14px;color:var(--mute);max-width:80ch}
+.provenance>span:last-child{flex:1}
+.provenance .dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;flex:none;margin-top:7px}
+
+/* sections */
+section{padding-block:clamp(36px,5vw,64px)}
+.sec-head{display:grid;gap:10px;margin-bottom:26px}
+.sec-head p{max-width:66ch}
+
+/* pipeline */
+.pipe{display:grid;grid-template-columns:repeat(5,1fr);gap:0;border:1px solid var(--line);background:var(--card)}
+.pipe .step{padding:16px 16px 18px;border-right:1px solid var(--line);display:grid;gap:8px;align-content:start;position:relative}
+.pipe .step:last-child{border-right:0}
+.pipe .step .n{font-family:var(--mono);font-size:12px;color:var(--faint);letter-spacing:.06em}
+.pipe .step h3{font-size:17px}
+.pipe .step p{font-size:14.5px;line-height:1.45;color:var(--body)}
+.pipe .step.hot{background:var(--volt-soft)}
+.pipe .step.hot .n{color:var(--volt-txt)}
+@media (max-width:900px){.pipe{grid-template-columns:1fr 1fr}.pipe .step{border-bottom:1px solid var(--line)}.pipe .step:nth-child(2n){border-right:0}}
+@media (max-width:520px){.pipe{grid-template-columns:1fr}.pipe .step{border-right:0}}
+details.arch{margin-top:16px;border:1px solid var(--line);background:var(--card)}
+details.arch summary{cursor:pointer;padding:12px 16px;font-family:var(--mono);font-size:13px;color:var(--mute);list-style:none;display:flex;justify-content:space-between;align-items:center}
+details.arch summary::-webkit-details-marker{display:none}
+details.arch summary::after{content:"+";font-size:18px;color:var(--faint)}
+details.arch[open] summary::after{content:"−"}
+details.arch .body{padding:0 16px 16px}
+details.arch img{display:block;width:100%;max-width:820px;margin:0 auto;border:1px solid var(--line);background:#FBFBF7}
+
+/* scenario tabs */
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{appearance:none;background:none;border:0;border-bottom:3px solid transparent;margin-bottom:-1px;padding:12px 16px 12px 0;margin-right:22px;font:inherit;font-family:var(--mono);font-size:14px;color:var(--mute);cursor:pointer;white-space:nowrap;display:grid;gap:3px;text-align:left}
+.tab small{font-family:var(--text);font-size:12.5px;color:var(--faint)}
+.tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--volt)}
+.tab[aria-selected="true"] small{color:var(--mute)}
+.panel{display:grid;gap:22px;padding-top:26px}
+.panel[hidden]{display:none}
+.panel-head{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:18px 40px;align-items:start}
+@media (max-width:760px){.panel-head{grid-template-columns:1fr}}
+.claim{font-size:clamp(19px,2.1vw,22px);line-height:1.4;color:var(--ink);font-weight:600;text-wrap:pretty}
+.facts{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:14.5px;align-content:start}
+.facts dt{color:var(--mute);font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase;padding-top:3px}
+.facts dd{margin:0;color:var(--body)}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{font-family:var(--mono);font-size:12px;padding:2px 8px;border:1px solid var(--line-d);border-radius:999px;color:var(--body);background:var(--card);white-space:nowrap}
+.chip.hot{border-color:var(--volt-edge);background:var(--volt-soft);color:var(--volt-txt)}
+
+/* chart card */
+.chart-card{background:var(--card);border:1px solid var(--line);box-shadow:var(--shadow)}
+.chart-bar{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line)}
+.legend{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:13.5px;color:var(--mute);align-items:center}
+.legend .sw{display:inline-block;width:18px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px;transform:translateY(-1px)}
+.legend .pt{display:inline-block;width:9px;height:9px;border-radius:50%;vertical-align:middle;margin-right:6px;transform:translateY(-1px)}
+.legend .pt.ring{background:none;border:2px solid var(--ink);width:10px;height:10px}
+.legend .tri{display:inline-block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:9px solid var(--amber);vertical-align:middle;margin-right:6px}
+.seg{display:inline-flex;border:1px solid var(--line-d);border-radius:6px;overflow:hidden}
+.seg button{appearance:none;border:0;background:var(--card);color:var(--mute);font:inherit;font-family:var(--mono);font-size:13px;padding:6px 12px;cursor:pointer}
+.seg button+button{border-left:1px solid var(--line-d)}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--paper)}
+.btn{appearance:none;border:1px solid var(--volt);background:var(--volt);color:#fff;font:inherit;font-weight:600;font-size:14px;padding:7px 14px;border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;gap:8px}
+.btn:hover{filter:brightness(.95)}
+.btn.ghost{background:var(--card);color:var(--volt-txt);border-color:var(--volt-edge)}
+.btn .tri-r{width:0;height:0;border-top:5px solid transparent;border-bottom:5px solid transparent;border-left:8px solid currentColor}
+.btn .sq{width:9px;height:9px;background:currentColor;border-radius:1px}
+.controls{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center}
+.chart-wrap{position:relative;padding:8px 8px 0}
+.chart-wrap svg{display:block;width:100%;height:auto;touch-action:pan-y}
+.readout{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;padding:10px 16px 12px;border-top:1px solid var(--line);font-size:14.5px;min-height:56px;align-items:baseline}
+.readout .w{font-family:var(--mono);font-size:13px;color:var(--mute);white-space:nowrap}
+.readout .s{color:var(--body)}
+.readout .s b{color:var(--ink)}
+.readout .s .tr{font-family:var(--mono);font-size:12.5px;padding:1px 7px;border-radius:4px;margin-left:6px;white-space:nowrap}
+.tr.open{background:var(--volt-soft);color:var(--volt-txt);border:1px solid var(--volt-edge)}
+.tr.esc{background:var(--red-soft);color:var(--red);border:1px solid var(--red)}
+.tr.res{background:var(--green-soft);color:var(--green);border:1px solid var(--green)}
+.tr.sup{background:var(--surface);color:var(--mute);border:1px dashed var(--line-d)}
+.strip-wrap{padding:6px 8px 10px;border-top:1px solid var(--line)}
+.strip-wrap svg{display:block;width:100%;height:auto}
+.strip-foot{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px 16px;padding:0 16px 12px;font-size:13.5px;color:var(--mute)}
+.strip-foot label{display:inline-flex;gap:6px;align-items:center;cursor:pointer}
+.strip-foot input{accent-color:var(--volt)}
+
+/* svg classes */
+.gridline{stroke:var(--line);stroke-width:1;shape-rendering:crispEdges}
+.axis{stroke:var(--line-d);stroke-width:1;shape-rendering:crispEdges}
+.tick{font-family:var(--mono);font-size:11px;fill:var(--mute)}
+.axis-title{font-family:var(--text);font-size:12.5px;fill:var(--mute)}
+.thr-fire{stroke:var(--red);stroke-width:1.2;stroke-dasharray:6 4}
+.thr-clear{stroke:var(--faint);stroke-width:1;stroke-dasharray:2 4}
+.thr-label{font-family:var(--mono);font-size:10.5px}
+.thr-label.fire{fill:var(--red)}
+.thr-label.clear{fill:var(--mute)}
+.event{fill:var(--surface-2);opacity:.75}
+.event-label{font-family:var(--text);font-style:italic;font-size:11.5px;fill:var(--mute)}
+.line.blue{stroke:var(--blue)} .line.volt{stroke:var(--volt)}
+.line{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.pt{stroke:var(--card);stroke-width:1.2}
+.pt.blue{fill:var(--blue)} .pt.volt{fill:var(--volt)} .pt.breach{fill:var(--red)} .pt.dead{fill:var(--amber)}
+.pt.nc{fill:var(--amber-soft);stroke:var(--amber);stroke-width:1.4}
+.ring{fill:none;stroke:var(--ink);stroke-width:1.8}
+.ring-label{font-family:var(--text);font-size:11.5px;fill:var(--ink);font-weight:600}
+.guide{stroke:var(--ink);stroke-width:1;stroke-dasharray:3 3;opacity:0;pointer-events:none}
+.hover-zone{fill:transparent;cursor:crosshair}
+.row-label{font-family:var(--mono);font-size:11px;fill:var(--body)}
+.row-sub{font-family:var(--text);font-size:11px;fill:var(--mute)}
+.bar-open{fill:var(--volt-soft);stroke:var(--volt-edge);stroke-width:1}
+.bar-esc{fill:var(--volt);stroke:var(--volt);stroke-width:1}
+.bar-sup{fill:none;stroke:var(--line-d);stroke-width:1;stroke-dasharray:3 2}
+.bar-nc{fill:var(--amber-soft);stroke:var(--amber);stroke-width:1}
+.res-mark{fill:var(--green)}
+.status-chip{font-family:var(--mono);font-size:10.5px}
+.status-chip.escalated{fill:var(--red)} .status-chip.resolved{fill:var(--green)} .status-chip.open{fill:var(--volt-txt)} .status-chip.suppressed{fill:var(--faint)}
+.strip-empty{font-family:var(--text);font-size:13px;fill:var(--mute);font-style:italic}
+
+/* proof row */
+.proof{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:18px;align-items:start}
+@media (max-width:860px){.proof{grid-template-columns:1fr}}
+figure{margin:0;display:grid;gap:8px}
+figure img{display:block;width:100%;border:1px solid var(--line);background:#fff}
+figcaption{font-size:13.5px;color:var(--mute);line-height:1.4}
+figcaption b{color:var(--body);font-weight:600}
+.term.verify{white-space:pre-wrap;word-break:break-word}
+.term{background:var(--band);color:var(--band-text);border-radius:6px;padding:14px 16px;font-family:var(--mono);font-size:12.5px;line-height:1.55;overflow-x:auto;margin:0}
+.term .cmd{color:var(--band-text)}
+.term .cmd::before{content:"$ ";color:var(--band-mute)}
+.term .pass{color:var(--band-green)}
+.term .dim{color:var(--band-mute)}
+.term-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+.term-head .eyebrow{color:var(--mute)}
+
+/* run */
+.run{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px 40px;align-items:start}
+@media (max-width:800px){.run{grid-template-columns:1fr}}
+.run pre.term{font-size:13px}
+.run pre.term .c{color:var(--band-mute)}
+.notes{display:grid;gap:14px;font-size:15.5px}
+.notes li{margin:0}
+.notes ul{margin:0;padding-left:18px;display:grid;gap:8px}
+.scope{border-left:3px solid var(--volt);padding:4px 0 4px 18px;max-width:66ch}
+footer{padding-block:28px 48px;font-size:14px;color:var(--mute);display:flex;flex-wrap:wrap;gap:8px 24px;justify-content:space-between}
+</style>
+</head>
+<body>
+<header class="wrap hero">
+  <div class="eyebrow">Project demo · every number below comes from one live run</div>
+  <h1>driftwatch</h1>
+  <p class="lede">A model-agnostic monitoring service. Any model POSTs its predictions to one schema; driftwatch stores them, compares live inputs and scores against a frozen training baseline, scores performance once the real outcomes arrive (often weeks later), and raises an alert only when something has actually degraded.</p>
+  <div class="hero-links">
+    <a href="https://github.com/i-hridaysaha/driftwatch">Source on GitHub</a>
+    <a href="https://www.hridaysaha.com/projects-1/drift-watch%3A-ml-model-monitoring-service">Case study</a>
+    <a href="#scenarios">Jump to the scenarios</a>
+  </div>
+  <div class="tiles" id="tiles">
+    <div class="tile"><div class="v num" data-total="predictions">—</div><div class="k">predictions ingested through the API</div></div>
+    <div class="tile"><div class="v num" data-total="labels">—</div><div class="k">labels backfilled, keyed on prediction_id</div></div>
+    <div class="tile"><div class="v num" data-total="windows">—</div><div class="k">hourly windows evaluated on two clocks</div></div>
+    <div class="tile accent"><div class="v num"><span data-total="alerts">—</span><small>/ 0 unexpected</small></div><div class="k">alerts opened across five staged faults</div></div>
+    <div class="tile"><div class="v num">24<small>/ 24</small></div><div class="k">verifier checks passed, re-derived from the database</div></div>
+    <div class="tile"><div class="v num">219</div><div class="k">tests in the suite, 31 files</div></div>
+  </div>
+  <div class="provenance"><span class="dot"></span><span>Generated 2026-09-19 with <code>driftwatch demo &lt;scenario&gt;</code> against Postgres 16, then <code>driftwatch demo-verify</code>. Synthetic, seeded data: regenerating reproduces every figure to the last digit.</span></div>
+</header>
+
+<hr class="rule">
+
+<section class="wrap" id="how">
+  <div class="sec-head">
+    <h2>How a prediction becomes an alert</h2>
+    <p class="measure">One append-only store, two evaluation paths that close at different times, and one state machine deciding what is worth a person's attention.</p>
+  </div>
+  <div class="pipe">
+    <div class="step"><div class="n">INGEST</div><h3>One schema, any model</h3><p><code>POST /predictions</code>, <code>/labels</code>, <code>/baselines</code> on FastAPI. Schema failures refused with 422, duplicates skipped, late rows stored and counted. <code>X-API-Key</code> guards every write.</p></div>
+    <div class="step"><div class="n">STORE</div><h3>Append-only Postgres</h3><p>Nothing accepted is ever rewritten. Windows are cut by event time, so a backfill years later lands in the same UTC-aligned hour.</p></div>
+    <div class="step hot"><div class="n">EVALUATE · TWO CLOCKS</div><h3>Drift now, performance later</h3><p>Drift (PSI, KS, Cramér's V, JSD) is sealed once per window, and refused where its sampling-noise floor exceeds the clear threshold. Performance (PR-AUC) is recomputed whenever labels land.</p></div>
+    <div class="step"><div class="n">DECIDE</div><h3>Alert state machine</h3><p>Separate fire and clear thresholds with a dead zone between them; consecutive-window gates to open, escalate and resolve. Evidence is frozen at open and again at escalation.</p></div>
+    <div class="step"><div class="n">TELL</div><h3>Notify, then show</h3><p>Log and webhook on each transition, retried for up to five ticks. A read-only dashboard draws <code>not_computable</code> as an explicit marker, never as a gap.</p></div>
+  </div>
+  <details class="arch">
+    <summary><span>Full architecture diagram (from the case study)</span></summary>
+    <div class="body"><img src="figures/03_architecture.png" alt="System architecture: predictions, labels and baseline registrations enter through one FastAPI endpoint into an append-only Postgres store; a scheduler drives the drift path and label ingestion drives the performance path; both feed an alert state machine; results and alert rows are written back; notifications leave on status transitions; a read-only dashboard reads the store directly." loading="lazy"></div>
+  </details>
+</section>
+
+<hr class="rule">
+
+<section class="wrap" id="scenarios">
+  <div class="sec-head">
+    <h2>Five staged faults, one verifier</h2>
+    <p class="measure">Each scenario injects one specific fault, or none, into a seeded synthetic model. After the run, <code>demo-verify</code> reads the database back and asserts that driftwatch caught exactly that fault and nothing else. Hover any window, or replay the run to watch the state machine decide.</p>
+  </div>
+  <div class="tabs" role="tablist" id="tabs"></div>
+  <div id="panels"></div>
+</section>
+
+<hr class="rule">
+
+<section class="wrap" id="run">
+  <div class="sec-head">
+    <h2>Run it yourself</h2>
+    <p class="measure">Everything on this page reproduces from a clean checkout. The dashboard is a local Streamlit app; the seeded scenarios are the proof.</p>
+  </div>
+  <div class="run">
+    <pre class="term"><span class="c"># pinned deps, a Postgres 16, migrations</span>
+uv sync
+docker compose up -d postgres
+uv run alembic upgrade head
+
+<span class="c"># reset the database, load one scenario end to end, verify it</span>
+uv run driftwatch demo segment_isolated
+uv run driftwatch demo-verify segment_isolated
+
+<span class="c"># load the other four additively, as this page did</span>
+uv run driftwatch demo clean --no-reset
+uv run driftwatch demo covariate_shift --no-reset
+uv run driftwatch demo concept_drift --no-reset
+uv run driftwatch demo burst_shift --no-reset
+
+<span class="c"># explore, or bring up API + scheduler + dashboard together</span>
+uv run streamlit run src/driftwatch/dashboard/app.py
+docker compose up --build</pre>
+    <div class="notes">
+      <p>Onboarding a new model is a YAML file, not code: its feature schema, segments and which profile governs its alerting. Two profiles ship and both are exercised above.</p>
+      <ul>
+        <li><b>patient</b> — hourly windows; needs 3 consecutive breaches to open, 8 to escalate, 5 clear windows to resolve; PSI fires at 0.25 and clears at 0.15. Built for slow population drift.</li>
+        <li><b>aggressive</b> — fires on the first breaching window, escalates on the third, resolves after two clear ones; PSI fires at 0.10. Built for fast, adversarial inputs.</li>
+      </ul>
+      <p>CI regenerates and verifies every scenario at its shipped seed and at two others (<code>--seed 7</code>, <code>--seed 11</code>), one matrix job each. Set <code>API_KEY</code> to require <code>X-API-Key</code> on every write; leave it unset and the API says so at startup.</p>
+    </div>
+  </div>
+</section>
+
+<hr class="rule">
+
+<section class="wrap" id="scope">
+  <div class="sec-head"><h2>Scope, stated plainly</h2></div>
+  <div class="scope notes">
+    <p>The data is synthetic and staged. Scenario parameters, including a bimodal score distribution, were tuned so the signal is legible on a chart, not to claim detection sensitivity on real production traffic. What the numbers show is narrower and more useful: a scenario built to demonstrate one property demonstrates it, the verifier re-derives that from the database, and the same seed reproduces it exactly.</p>
+    <p>driftwatch evaluates on a schedule over windows; it is not a per-request detector. It tells you something changed and does not retrain, roll back, or swap in a challenger. It has not run against real production traffic. Authentication is one shared key. The sampling-noise floors refuse rather than correct: a signal asked for at a volume that cannot carry it is reported as silence, and the operator widens the window or drops the test.</p>
+  </div>
+</section>
+
+<footer class="wrap">
+  <span>MIT © Hriday Saha</span>
+  <span><a href="https://github.com/i-hridaysaha/driftwatch">github.com/i-hridaysaha/driftwatch</a> · <a href="https://www.hridaysaha.com/projects-1/drift-watch%3A-ml-model-monitoring-service">case study</a></span>
+</footer>
+
+<script id="dw-data" type="application/json">__DATA__</script>
+<script>
+(function(){
+  const DATA = JSON.parse(document.getElementById('dw-data').textContent);
+  const VERIFY = __VERIFY__;
+  const PROFILES = {
+    patient:    { psi:{fire:.25,clear:.15}, ks:{fire:.3,clear:.15}, pr_auc:{fire:.5,clear:.65,below:true}, fire:3, escalate:8, resolve:5, nc:3, name:'patient' },
+    aggressive: { psi:{fire:.1,clear:.07}, ks:{fire:.15,clear:.1}, pr_auc:{fire:.3,clear:.4,below:true}, fire:1, escalate:3, resolve:2, nc:2, name:'aggressive' },
+  };
+  const SCEN = [
+    { key:'clean', label:'clean', sub:'no fault', profile:'patient',
+      claim:'Nothing was injected, so nothing may fire. Forty hourly windows of pure sampling noise sit well under every threshold.',
+      fault:'none', expect:'no alerts; zero significant readings anywhere',
+      volume:'1,200 predictions a window · 3,600-row baseline',
+      events:[],
+      stats:[{key:'psi',label:'PSI'},{key:'ks',label:'KS D'}],
+      series:m=>[{key:`age_${m}_global`, label:'global · age', color:'blue'}],
+      shot:'shots/clean_alerts.png', shotAlt:'Dashboard alert history for the clean scenario: no alerts touched, no suppressed episodes.',
+      caption:'<b>Alert history.</b> Nothing fired and nothing was even close: no episode ever reached persistence. A cheaper experiment in <code>figures/_src/sweeps.py</code> runs forty clean seeds at the segment scenario\'s geometry and opens zero spurious alerts on either PSI or KS.' },
+    { key:'covariate_shift', label:'covariate_shift', sub:'global input shift', profile:'patient',
+      claim:'A one-window blip must not open an alert. A sustained shift on the same feature must open, then escalate.',
+      fault:'mean shift on <code>age</code>: +3.5σ for one window at 40, then +4.5σ from window 55 onward',
+      expect:'the blip is suppressed; the sustained shift opens after 3 breaching windows and escalates after 8',
+      volume:'1,200 predictions a window · 3,600-row baseline',
+      events:[{s:40,e:40,label:'blip, one window'},{s:55,e:89,label:'sustained shift'}],
+      stats:[{key:'ks',label:'KS D'},{key:'psi',label:'PSI'}],
+      series:m=>[{key:`age_${m}_global`, label:'global · age', color:'blue'}],
+      shot:'shots/covariate_timeline.png', shotAlt:'Dashboard drift timeline for age / KS: one red breach point at the blip, then a run of breach points from the sustained shift.',
+      caption:'<b>Drift timeline, age / KS.</b> The blip is a single red point; it appears in the dashboard\'s <i>Suppressed</i> table, not the alert table. Under PSI the same shift reads 14, so the KS D-statistic (bounded in [0, 1]) is the more legible view of it.' },
+    { key:'segment_isolated', label:'segment_isolated', sub:'the lie of the average', profile:'patient',
+      claim:'A shift confined to 15% of traffic must fire inside that segment while the global reading stays quiet.',
+      fault:'mean shift of +1.0σ on <code>age</code>, only for <code>region=APAC</code>, windows 32 to 41',
+      expect:'APAC opens, escalates and, after the shift ends, resolves; global never crosses the fire line',
+      volume:'2,000 predictions a window · 6,000-row baseline · APAC sees about 300 rows against 900',
+      events:[{s:32,e:41,label:'APAC-only shift'}],
+      stats:[{key:'psi',label:'PSI'},{key:'ks',label:'KS D'}],
+      series:m=>[{key:`age_${m}_global`, label:'global · age', color:'blue'},{key:`age_${m}_APAC`, label:'APAC · age', color:'volt'}],
+      shot:'shots/segment_view.png', shotAlt:'Dashboard segment view: four small charts for Global, APAC, EU and US; only APAC shows breach points.',
+      caption:'<b>Segment view.</b> One facet per region value beside the global one. Only APAC breaches. This scenario also fixed a real bug: at 500 rows a window PSI\'s own noise floor sat inside the dead zone and the APAC alert could never assemble five clear windows; the pipeline now computes that floor per window and refuses to gate where it exceeds the clear threshold.' },
+    { key:'concept_drift', label:'concept_drift', sub:'labels arrive late', profile:'patient',
+      claim:'Inputs stay perfectly stable. The model quietly gets worse, and that is only visible once ground-truth labels backfill.',
+      fault:'label noise raised to 0.70 from window 40; no feature or score shift at all',
+      expect:'no drift alerts; PR-AUC degrades after backfill and the performance alert escalates',
+      volume:'1,200 predictions a window · labels arrive with a 6 h median delay, up to 72 h',
+      events:[{s:40,e:59,label:'label noise 0.70'}],
+      stats:[{key:'final',label:'after labels'},{key:'initial',label:'at window close'}],
+      series:m=>[{key:`pr_auc_${m}`, label:m==='final'?'global · PR-AUC, final':'global · PR-AUC, first pass', color:'volt'}],
+      metric:'pr_auc',
+      shot:'shots/concept_performance.png', shotAlt:'Dashboard performance timeline for pr_auc: the first-pass revision is a row of not-computable markers, the latest revision drops from about 0.87 to about 0.39.',
+      caption:'<b>Performance over time.</b> Both revisions are drawn: the first pass is a row of <code>not_computable</code> triangles (a few labels an hour, under the 50-label minimum), the latest is the backfilled truth. A missing point would read as "all clear"; the marker is the point.' },
+    { key:'burst_shift', label:'burst_shift', sub:'aggressive profile', profile:'aggressive',
+      claim:'Under the aggressive profile a burst must open on its very first breaching window, and a one-window blip is deliberately allowed to open and resolve.',
+      fault:'mean shift of +0.6σ on <code>age</code>: windows 20 to 23, then window 40 alone',
+      expect:'the burst opens at 20, escalates at 22, resolves; the blip opens at 40 and resolves without escalating',
+      volume:'2,000 predictions a window · 6,000-row baseline',
+      events:[{s:20,e:23,label:'four-window burst'},{s:40,e:40,label:'blip'}],
+      stats:[{key:'psi',label:'PSI'},{key:'ks',label:'KS D'}],
+      series:m=>[{key:`age_${m}_global`, label:'global · age', color:'blue'}],
+      shot:'shots/burst_alerts.png', shotAlt:'Dashboard alert history for burst_shift: sixteen resolved drift alerts, one row per signal and segment, with their frozen evidence statistics.',
+      caption:'<b>Alert history.</b> Every row carries the statistic frozen at the moment it opened; escalated rows carry a second one frozen at escalation. A global shift shows up in every segment too, which is why there are sixteen resolved rows and not two.' },
+  ];
+
+  const W=920, L=150, R=22, T=26, B=40, H=300;
+  const PW = W-L-R;
+  const svgNS='http://www.w3.org/2000/svg';
+  const el=(tag,attrs,text)=>{const n=document.createElementNS(svgNS,tag);for(const k in attrs)n.setAttribute(k,attrs[k]);if(text!=null)n.textContent=text;return n;};
+  const h=(tag,cls,html)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(html!=null)n.innerHTML=html;return n;};
+  const fmt=n=>n.toLocaleString('en-US');
+  const f3=v=>v==null?'—':(Math.abs(v)>=10?v.toFixed(1):v.toFixed(3));
+  const start = new Date(DATA.scenarios.clean.window_start);
+  const stamp=i=>{const d=new Date(start.getTime()+i*3600e3);return d.toISOString().slice(0,16).replace('T',' ')+' UTC';};
+
+  for(const k in DATA.totals){document.querySelectorAll(`[data-total="${k}"]`).forEach(n=>n.textContent=fmt(DATA.totals[k]));}
+
+  function thresholds(sc, stat){
+    const p=PROFILES[sc.profile];
+    if(sc.metric) return {fire:p.pr_auc.fire, clear:p.pr_auc.clear, below:true};
+    return {fire:p[stat].fire, clear:p[stat].clear, below:false};
+  }
+  function value(pt){ return pt==null?null:(pt.stat!=null?pt.stat:pt.value); }
+  function classify(pt, th){
+    if(pt==null) return 'none';
+    if(pt.status!=='computed') return 'nc';
+    const v=value(pt);
+    if(th.below){ if(v<=th.fire) return 'breach'; if(v>=th.clear) return 'clear'; return 'dead'; }
+    if(v>=th.fire) return 'breach'; if(v<=th.clear) return 'clear'; return 'dead';
+  }
+  function streaks(cls){ // run length of the same class ending at i
+    const out=[];let run=0,prev=null;
+    for(let i=0;i<cls.length;i++){run=(cls[i]===prev)?run+1:1;prev=cls[i];out.push(run);}
+    return out;
+  }
+  function suppressed(cls, need){ // breach runs shorter than the fire persistence
+    const eps=[];let s=-1;
+    for(let i=0;i<=cls.length;i++){
+      const b=i<cls.length&&cls[i]==='breach';
+      if(b&&s<0)s=i; if(!b&&s>=0){ if(i-s<need)eps.push({s,e:i-1}); s=-1; }
+    }
+    return eps;
+  }
+  function niceTicks(max){
+    const raw=max/4, mag=Math.pow(10,Math.floor(Math.log10(raw)));
+    const step=[1,2,2.5,5,10].map(m=>m*mag).find(s=>s>=raw);
+    const t=[];for(let v=0;v<=max+1e-9;v+=step)t.push(+v.toFixed(6));return t;
+  }
+
+  // ---------- state per scenario ----------
+  const state={};
+
+  function buildPanel(sc){
+    const panel=h('div','panel');panel.id='panel-'+sc.key;panel.setAttribute('role','tabpanel');
+    const p=PROFILES[sc.profile];
+    const head=h('div','panel-head');
+    const left=h('div');left.appendChild(h('p','claim',sc.claim));
+    const chips=h('div','chips');chips.style.marginTop='12px';
+    chips.innerHTML=`<span class="chip hot">profile: ${p.name}</span><span class="chip">open after ${p.fire} breach${p.fire>1?'es':''}</span><span class="chip">escalate after ${p.escalate}</span><span class="chip">resolve after ${p.resolve} clear</span>`;
+    left.appendChild(chips);
+    const facts=h('dl','facts');
+    facts.innerHTML=`<dt>Injected</dt><dd>${sc.fault}</dd><dt>Must hold</dt><dd>${sc.expect}</dd><dt>Volume</dt><dd>${sc.volume}</dd><dt>Model id</dt><dd><code>${DATA.scenarios[sc.key].model_id}</code> · seed in <code>configs/scenarios/${sc.key}.yaml</code></dd>`;
+    head.appendChild(left);head.appendChild(facts);panel.appendChild(head);
+
+    const card=h('div','chart-card');
+    const bar=h('div','chart-bar');
+    const legend=h('div','legend');
+    const controls=h('div','controls');
+    const seg=h('div','seg');seg.setAttribute('role','group');seg.setAttribute('aria-label',sc.metric?'Revision':'Statistic');
+    sc.stats.forEach((s,i)=>{const b=h('button',null,s.label);b.type='button';b.id=`stat-${sc.key}-${s.key}`;b.setAttribute('aria-pressed',i===0?'true':'false');b.addEventListener('click',()=>{state[sc.key].stat=s.key;seg.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b?'true':'false'));render(sc);});seg.appendChild(b);});
+    const play=h('button','btn','<span class="tri-r"></span><span>Replay the run</span>');play.type='button';play.id='play-'+sc.key;
+    play.addEventListener('click',()=>togglePlay(sc));
+    controls.appendChild(seg);controls.appendChild(play);
+    bar.appendChild(legend);bar.appendChild(controls);card.appendChild(bar);
+    const wrap=h('div','chart-wrap');const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img'});wrap.appendChild(svg);card.appendChild(wrap);
+    const readout=h('div','readout');readout.innerHTML='<span class="w">hover a window</span><span class="s">or replay the run to watch each window arrive and the state machine react.</span>';card.appendChild(readout);
+    const stripWrap=h('div','strip-wrap');const strip=el('svg',{viewBox:`0 0 ${W} 40`,role:'img'});stripWrap.appendChild(strip);card.appendChild(stripWrap);
+    const foot=h('div','strip-foot');
+    const nSeg=DATA.scenarios[sc.key].alerts.filter(a=>a.segment).length;
+    foot.innerHTML=`<span>Alert lifecycle, one row per signal. Bars: <span style="color:var(--volt-txt)">open</span> → <span style="color:var(--red)">escalated</span> → <span style="color:var(--green)">● resolved</span>; dashed = breached but never reached persistence.</span>`;
+    if(nSeg&&sc.key!=='segment_isolated'){const lab=h('label');lab.innerHTML=`<input type="checkbox" id="seg-${sc.key}"> show the ${nSeg} per-segment rows`;lab.querySelector('input').addEventListener('change',e=>{state[sc.key].segs=e.target.checked;render(sc);});foot.appendChild(lab);}
+    card.appendChild(foot);
+    panel.appendChild(card);
+
+    const proof=h('div','proof');
+    const fig=h('figure');fig.innerHTML=`<img src="${sc.shot}" alt="${sc.shotAlt}" loading="lazy"><figcaption>${sc.caption}</figcaption>`;
+    const term=h('div');term.innerHTML=`<div class="term-head"><span class="eyebrow">demo-verify, this run</span></div>`;
+    const pre=h('pre','term verify');pre.innerHTML=VERIFY[sc.key];term.appendChild(pre);
+    proof.appendChild(fig);proof.appendChild(term);panel.appendChild(proof);
+
+    state[sc.key]={stat:sc.stats[0].key,segs:false,reveal:Infinity,timer:null,svg,strip,legend,readout,play};
+    return panel;
+  }
+
+  function render(sc){
+    const st=state[sc.key];const d=DATA.scenarios[sc.key];const n=d.n_windows;const p=PROFILES[sc.profile];
+    const th=thresholds(sc,st.stat);
+    const series=sc.series(st.stat).map(s=>({...s,pts:d[s.key]}));
+    const primary=series[series.length-1];
+    const cls=primary.pts.map(pt=>classify(pt,th));
+    const run=streaks(cls);
+    st.cls=cls;st.run=run;st.th=th;st.series=series;st.primary=primary;
+    let vmax=0;series.forEach(s=>s.pts.forEach(pt=>{const v=value(pt);if(v!=null&&v>vmax)vmax=v;}));
+    const ymax=sc.metric?1:Math.max(th.fire*1.6,vmax*1.28);
+    const x=i=>L+(n<=1?0:(i/(n-1))*PW);
+    const y=v=>T+(1-v/ymax)*(H-T-B);
+    const svg=st.svg;while(svg.firstChild)svg.removeChild(svg.firstChild);
+    svg.setAttribute('aria-label',`${sc.key}: ${primary.label} per window with fire and clear thresholds`);
+    const defs=el('defs');const cp=el('clipPath',{id:'clip-'+sc.key});st.clipRect=el('rect',{x:0,y:0,width:W,height:H});cp.appendChild(st.clipRect);defs.appendChild(cp);svg.appendChild(defs);
+    // events
+    sc.events.forEach(ev=>{const x0=x(ev.s)-PW/(n-1)/2,x1=x(ev.e)+PW/(n-1)/2;svg.appendChild(el('rect',{class:'event',x:x0,y:T,width:x1-x0,height:H-T-B}));const late=x0>W*0.62;const tl=el('text',{class:'event-label',x:late?x0-6:x1+6,y:T+14,'text-anchor':late?'end':'start'},ev.label);svg.appendChild(tl);});
+    // grid + y ticks
+    niceTicks(ymax).forEach(t=>{if(t>ymax)return;svg.appendChild(el('line',{class:'gridline',x1:L,x2:W-R,y1:y(t),y2:y(t)}));svg.appendChild(el('text',{class:'tick',x:L-8,y:y(t)+4,'text-anchor':'end'},String(t)));});
+    svg.appendChild(el('line',{class:'axis',x1:L,x2:W-R,y1:y(0),y2:y(0)}));
+    // x ticks
+    for(let i=0;i<n;i+=10){svg.appendChild(el('line',{class:'axis',x1:x(i),x2:x(i),y1:y(0),y2:y(0)+4}));svg.appendChild(el('text',{class:'tick',x:x(i),y:y(0)+16,'text-anchor':'middle'},String(i)));}
+    svg.appendChild(el('text',{class:'axis-title',x:L+PW/2,y:H-6,'text-anchor':'middle'},`evaluation window (one hour each, from ${stamp(0)})`));
+    svg.appendChild(el('text',{class:'axis-title',x:L,y:T-10,'text-anchor':'start'},sc.metric?'PR-AUC, global':(st.stat==='psi'?'population stability index':'KS D-statistic')));
+    // thresholds
+    if(th.fire<=ymax){svg.appendChild(el('line',{class:'thr-fire',x1:L,x2:W-R,y1:y(th.fire),y2:y(th.fire)}));svg.appendChild(el('text',{class:'thr-label fire',x:W-R,y:y(th.fire)+(th.below?12:-4),'text-anchor':'end'},`fire ${th.fire}`));}
+    if(th.clear<=ymax){svg.appendChild(el('line',{class:'thr-clear',x1:L,x2:W-R,y1:y(th.clear),y2:y(th.clear)}));svg.appendChild(el('text',{class:'thr-label clear',x:W-R,y:y(th.clear)+(th.below?-4:12),'text-anchor':'end'},`clear ${th.clear}`));}
+    // series
+    const g=el('g',{'clip-path':`url(#clip-${sc.key})`});
+    series.forEach(s=>{
+      const scls=s===primary?cls:s.pts.map(pt=>classify(pt,th));
+      let dstr='';let pen=false;
+      s.pts.forEach((pt,i)=>{const v=value(pt);if(v==null||pt.status!=='computed'){pen=false;return;}dstr+=(pen?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1);pen=true;});
+      if(dstr)g.appendChild(el('path',{class:'line '+s.color,d:dstr}));
+      s.pts.forEach((pt,i)=>{
+        const c=scls[i];
+        if(c==='nc'){const px=x(i),py=y(0)-5;g.appendChild(el('path',{class:'pt nc','data-i':i,d:`M${px} ${py-5}L${px+5} ${py+4}L${px-5} ${py+4}Z`}));return;}
+        if(c==='none')return;
+        const k=c==='breach'?'breach':c==='dead'?'dead':s.color;
+        g.appendChild(el('circle',{class:'pt '+k,'data-i':i,cx:x(i),cy:y(value(pt)),r:s===primary?3.4:2.6}));
+      });
+    });
+    // transition rings on the primary series' alert(s)
+    const prim=primaryAlerts(sc,st);
+    prim.forEach(a=>{[['opened_window','opens'],['escalated_window','escalates'],['resolved_window','resolves']].forEach(([k,lab])=>{const i=a[k];if(i==null)return;const pt=primary.pts[i];const v=value(pt);if(v==null)return;g.appendChild(el('circle',{class:'ring',cx:x(i),cy:y(v),r:7}));const above=!th.below;g.appendChild(el('text',{class:'ring-label',x:x(i),y:y(v)+(above?-12:18),'text-anchor':'middle'},sc.metric?'escalates on backfill':lab));});});
+    svg.appendChild(g);
+    st.guide=el('line',{class:'guide',x1:L,x2:L,y1:T,y2:y(0)});svg.appendChild(st.guide);
+    const zone=el('rect',{class:'hover-zone',x:L-6,y:T,width:PW+12,height:H-T-B});svg.appendChild(zone);
+    const toI=evt=>{const r=svg.getBoundingClientRect();const px=(evt.clientX-r.left)/r.width*W;return Math.max(0,Math.min(n-1,Math.round((px-L)/PW*(n-1))));};
+    zone.addEventListener('mousemove',e=>{if(st.timer)return;showWindow(sc,toI(e));});
+    zone.addEventListener('mouseleave',()=>{if(st.timer)return;st.guide.style.opacity=0;});
+    zone.addEventListener('touchstart',e=>{if(st.timer)return;showWindow(sc,toI(e.touches[0]));},{passive:true});
+    zone.addEventListener('touchmove',e=>{if(st.timer)return;showWindow(sc,toI(e.touches[0]));},{passive:true});
+    st.x=x;
+    // legend
+    st.legend.innerHTML=series.map(s=>`<span><span class="sw" style="background:var(--${s.color})"></span>${s.label}</span>`).join('')+`<span><span class="pt" style="background:var(--red)"></span>breach</span><span><span class="pt" style="background:var(--amber)"></span>dead zone</span><span><span class="tri"></span>not computable</span><span><span class="pt ring"></span>alert transition</span>`;
+    renderStrip(sc);
+    applyReveal(sc);
+  }
+
+  function primaryAlerts(sc,st){
+    const d=DATA.scenarios[sc.key];
+    const isSeg=sc.key==='segment_isolated';
+    return d.alerts.filter(a=>{
+      if(sc.metric) return a.kind==='performance'&&a.segment==null;
+      if(a.signal!==st.stat) return false;
+      return isSeg? a.segment==='region=APAC' : a.segment==null;
+    }).map(a=>alertSpan(sc,st,a));
+  }
+  // where a bar starts and ends, derived from the alert row plus the classified trace
+  function alertSpan(sc,st,a){
+    const d=DATA.scenarios[sc.key];
+    if(a.kind==='not_computable') return {...a, bar_s:a.opened_window, bar_e:a.last_seen_window, nc:true};
+    if(a.kind==='performance'){
+      // performance alerts are re-evaluated on the backfill tick, not per window: the bar
+      // spans the run of breaching windows that the tick found, ending at the last window
+      const last=a.last_seen_window;let s=last;const cls=st.cls;
+      if(sc.metric&&st.stat==='final'){while(s>0&&cls[s-1]==='breach')s--;}
+      return {...a, bar_s:s, bar_e:last, opened_window:null, escalated_window:a.status==='escalated'?last:null, resolved_window:null};
+    }
+    return {...a, bar_s:a.opened_window, bar_e:a.resolved_window!=null?a.resolved_window:d.n_windows-1};
+  }
+
+  function chipText(s,e,yc,cls,text){
+    const st=curStrip;const x=st.x;const half=st.half;
+    const late=x(s)>L+PW*0.5;
+    return el('text',{class:'status-chip '+cls,x:late?x(e)+half:x(s)-half,y:yc+19,'text-anchor':late?'end':'start'},text);
+  }
+  let curStrip=null;
+  function renderStrip(sc){
+    const st=state[sc.key];const d=DATA.scenarios[sc.key];const n=d.n_windows;const p=PROFILES[sc.profile];
+    const x=st.x;const strip=st.strip;while(strip.firstChild)strip.removeChild(strip.firstChild);
+    let alerts=d.alerts.filter(a=>sc.metric?true:a.signal===st.stat);
+    if(sc.key==='segment_isolated'){/* global never fires; every row is APAC */}
+    else if(!st.segs) alerts=alerts.filter(a=>a.segment==null);
+    if(sc.metric&&st.stat!=='final') alerts=alerts.filter(a=>a.kind==='not_computable');
+    if(sc.metric&&st.stat==='final') alerts=alerts.filter(a=>a.kind==='performance');
+    const rows=alerts.map(a=>alertSpan(sc,st,a));
+    const sup=sc.metric?[]:suppressed(st.cls,p.fire).map(e=>({sup:true,...e}));
+    const all=[...rows,...sup];
+    const RH=38;const height=Math.max(40,all.length*RH+14);
+    strip.setAttribute('viewBox',`0 0 ${W} ${height}`);
+    strip.setAttribute('aria-label',`${all.length} alert rows for ${sc.key}`);
+    if(!all.length){strip.appendChild(el('text',{class:'strip-empty',x:L,y:24},sc.key==='clean'?'no alerts opened, no breach ever reached persistence — the verifier asserts both':'no alert rows for this statistic'));}
+    const clip=el('clipPath',{id:'sclip-'+sc.key});st.stripClip=el('rect',{x:0,y:0,width:W,height:height});clip.appendChild(st.stripClip);const defs=el('defs');defs.appendChild(clip);strip.appendChild(defs);
+    const g=el('g',{'clip-path':`url(#sclip-${sc.key})`});
+    const half=PW/(n-1)/2;curStrip={x,half};
+    const seen={};
+    all.forEach((r,ri)=>{
+      const yc=10+ri*RH+13;
+      strip.appendChild(el('line',{class:'gridline',x1:L,x2:W-R,y1:yc,y2:yc}));
+      if(r.sup){
+        strip.appendChild(el('text',{class:'row-label',x:L-8,y:yc+4,'text-anchor':'end'},`suppressed · ${st.stat}`));
+        g.appendChild(el('rect',{class:'bar-sup',x:x(r.s)-half,y:yc-6,width:x(r.e)-x(r.s)+2*half,height:12,rx:2}));
+        g.appendChild(chipText(r.s,r.e,yc,'suppressed',`${r.e-r.s+1} breaching window${r.e>r.s?'s':''}, ${p.fire} needed to open`));
+        return;
+      }
+      const who=r.segment?r.segment.replace('region=',''):'global';
+      let label=r.kind==='not_computable'?`silence · ${r.signal}`:`${who} · ${r.feature||''}${r.feature?' · ':''}${r.signal}`;
+      seen[label]=(seen[label]||0)+1; if(seen[label]>1) label+=` #${seen[label]}`;
+      strip.appendChild(el('text',{class:'row-label',x:L-8,y:yc+4,'text-anchor':'end'},label));
+      const s=r.bar_s,e=r.bar_e;
+      if(r.nc){
+        g.appendChild(el('rect',{class:'bar-nc',x:x(s)-half,y:yc-6,width:x(e)-x(s)+2*half,height:12,rx:2}));
+        g.appendChild(chipText(s,e,yc,'resolved','opened: labels under the 50-row minimum · resolved once the backfill made it computable'));
+        return;
+      }
+      const esc=r.escalated_window;
+      const openEnd=esc!=null?esc:e;
+      const x0=x(s)-half, xm=esc!=null?x(esc)-half:x(e)+half, x1=x(e)+half;
+      g.appendChild(el('rect',{class:'bar-open',x:x0,y:yc-6,width:Math.max(2,xm-x0),height:12,rx:2}));
+      if(esc!=null) g.appendChild(el('rect',{class:'bar-esc',x:xm,y:yc-6,width:Math.max(2,x1-xm),height:12,rx:2}));
+      if(r.resolved_window!=null){g.appendChild(el('circle',{class:'res-mark',cx:x(r.resolved_window),cy:yc,r:4}));}
+      const tail=r.status==='resolved'?`resolved at ${r.resolved_window}`:r.status==='escalated'?(r.kind==='performance'?`escalated on the backfill tick · ${r.breach_streak} breaching windows in the scan`:`still escalated`):'open';
+      const ev=r.evidence_stat!=null?` · opened at ${f3(r.evidence_stat)}`:'';
+      const ev2=r.escalation_stat!=null?`, escalated at ${f3(r.escalation_stat)}`:'';
+      g.appendChild(chipText(s,e,yc,r.status,tail+ev+ev2));
+    });
+    strip.appendChild(g);
+    st.stripRows=all;
+  }
+
+  function showWindow(sc,i){
+    const st=state[sc.key];const d=DATA.scenarios[sc.key];const pt=st.primary.pts[i];const v=value(pt);const c=st.cls[i];const r=st.run[i];const p=PROFILES[sc.profile];
+    st.guide.setAttribute('x1',st.x(i));st.guide.setAttribute('x2',st.x(i));st.guide.style.opacity=1;
+    const name=st.primary.label.replace(' · ',' ');
+    const what=sc.metric?'PR-AUC':st.stat.toUpperCase();
+    let s='';
+    if(c==='nc'){s=`<b>${name}</b> ${what} not computable — ${pt.reason||'no value'}`;}
+    else if(c==='none'){s=`no result for this window`;}
+    else{
+      const cl=c==='breach'?`<b>breach</b> (${ordinal(r)} in a row)`:c==='clear'?`clear (${ordinal(r)} in a row)`:`<b>dead zone</b> between ${st.th.clear} and ${st.th.fire}: every streak resets`;
+      s=`<b>${name}</b> ${what} <b class="num">${f3(v)}</b> · ${cl}`;
+    }
+    // transitions this window, across the rows shown in the strip
+    const trs=[];
+    (st.stripRows||[]).forEach(row=>{
+      if(row.sup){ if(row.e===i) trs.push(`<span class="tr sup">suppressed: ${row.e-row.s+1} breaching window${row.e>row.s?'s':''}, ${p.fire} needed to open</span>`); return; }
+      const who=row.segment?row.segment.replace('region=','')+' ':'';
+      if(row.kind==='not_computable'){ if(row.bar_s===i) trs.push(`<span class="tr open">silence alert opens: ${p.nc} windows not computable</span>`); return; }
+      if(row.kind==='performance'){ if(row.escalated_window===i) trs.push(`<span class="tr esc">${who}PR-AUC alert opens and escalates on the backfill tick: ${row.breach_streak} breaching windows in the scan, ${p.escalate} needed</span>`); return; }
+      if(row.opened_window===i) trs.push(`<span class="tr open">${who}${row.signal} opens at ${f3(row.evidence_stat)}</span>`);
+      if(row.escalated_window===i) trs.push(`<span class="tr esc">${who}${row.signal} escalates at ${f3(row.escalation_stat)}</span>`);
+      if(row.resolved_window===i) trs.push(`<span class="tr res">${who}${row.signal} resolves after ${p.resolve} clear</span>`);
+    });
+    st.readout.innerHTML=`<span class="w">window ${i} · ${stamp(i)}</span><span class="s">${s}${trs.join('')}</span>`;
+  }
+  const ordinal=n=>n+(n%10===1&&n%100!==11?'st':n%10===2&&n%100!==12?'nd':n%10===3&&n%100!==13?'rd':'th');
+
+  function applyReveal(sc){
+    const st=state[sc.key];const n=DATA.scenarios[sc.key].n_windows;
+    const i=st.reveal;const half=PW/(n-1)/2;
+    const wpx=i>=n-1?W:(st.x(Math.max(0,i))+half);
+    st.clipRect.setAttribute('width',wpx);
+    if(st.stripClip)st.stripClip.setAttribute('width',wpx);
+  }
+  function togglePlay(sc){
+    const st=state[sc.key];const n=DATA.scenarios[sc.key].n_windows;
+    if(st.timer){clearInterval(st.timer);st.timer=null;st.reveal=Infinity;applyReveal(sc);st.guide.style.opacity=0;st.play.innerHTML='<span class="tri-r"></span><span>Replay the run</span>';return;}
+    st.reveal=-1;applyReveal(sc);st.play.innerHTML='<span class="sq"></span><span>Stop</span>';
+    const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const step=()=>{st.reveal++;if(st.reveal>=n){clearInterval(st.timer);st.timer=null;st.reveal=Infinity;applyReveal(sc);st.play.innerHTML='<span class="tri-r"></span><span>Replay the run</span>';return;}applyReveal(sc);showWindow(sc,st.reveal);};
+    st.timer=setInterval(step,reduced?40:110);
+  }
+
+  // ---------- tabs ----------
+  const tabs=document.getElementById('tabs'),panels=document.getElementById('panels');
+  SCEN.forEach((sc,i)=>{
+    const t=h('button','tab',`<span>${sc.label}</span><small>${sc.sub}</small>`);t.type='button';t.setAttribute('role','tab');t.id='tab-'+sc.key;t.setAttribute('aria-controls','panel-'+sc.key);t.setAttribute('aria-selected',i===0?'true':'false');
+    t.addEventListener('click',()=>select(sc.key));tabs.appendChild(t);
+    const p=buildPanel(sc);p.hidden=i!==0;p.setAttribute('aria-labelledby','tab-'+sc.key);panels.appendChild(p);
+  });
+  function select(key){
+    SCEN.forEach(sc=>{const on=sc.key===key;document.getElementById('tab-'+sc.key).setAttribute('aria-selected',on?'true':'false');document.getElementById('panel-'+sc.key).hidden=!on;const st=state[sc.key];if(!on&&st.timer){togglePlay(sc);}});
+    try{localStorage.setItem('dw-tab',key);}catch(e){}
+    render(SCEN.find(s=>s.key===key));
+  }
+  tabs.addEventListener('keydown',e=>{const order=SCEN.map(s=>s.key);const cur=order.findIndex(k=>document.getElementById('tab-'+k).getAttribute('aria-selected')==='true');if(e.key==='ArrowRight'){select(order[(cur+1)%order.length]);document.getElementById('tab-'+order[(cur+1)%order.length]).focus();}if(e.key==='ArrowLeft'){select(order[(cur-1+order.length)%order.length]);document.getElementById('tab-'+order[(cur-1+order.length)%order.length]).focus();}});
+  let initial='segment_isolated';
+  try{const saved=localStorage.getItem('dw-tab');if(saved&&SCEN.some(s=>s.key===saved))initial=saved;}catch(e){}
+  select(initial);
+})();
+</script>
+</body>
+</html>

@@ -11,7 +11,7 @@ when something degrades.
 [![CI](https://github.com/i-hridaysaha/driftwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/i-hridaysaha/driftwatch/actions/workflows/ci.yml)
 
 📄 **Full write-up:** https://www.hridaysaha.com/projects-1/drift-watch%3A-ml-model-monitoring-service
-🕹️ **Interactive demo:** https://claude.ai/artifact/3o7Afdwm3v29RxkBsNhtEX — every scenario below, charted per window from one real run, with the alert lifecycle replayable window by window.
+🕹️ **Interactive demo:** https://i-hridaysaha.github.io/driftwatch/ — every scenario below, charted per window from one real run, with the alert lifecycle replayable window by window.
 
 The dashboard is a local Streamlit app; the demo page is a static snapshot of
 one run of it, and the reproducible proof lives in the seeded scenarios below.
@@ -235,6 +235,7 @@ configs/        profiles/ · models/ · scenarios/
 alembic/        migrations
 tests/          31 test files, 219 tests
 figures/        the case study's figures and the script that draws them from the generator
+docs/           the interactive demo (GitHub Pages) and the scripts that build it from one run
 ```
 
 ## Limitations & next steps

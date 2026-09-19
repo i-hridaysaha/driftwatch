@@ -1,0 +1,34 @@
+$ driftwatch demo-verify clean
+[PASS] scenario is currently loaded in the database: found 40 evaluated windows for 'demo-clean', expected 40 -- run `driftwatch demo clean` first if this doesn't match (loading a different scenario truncates every table)
+[PASS] no unexpected alerts: none
+[PASS] zero significant drift readings anywhere: 0 significant
+
+$ driftwatch demo-verify covariate_shift
+[PASS] scenario is currently loaded in the database: found 90 evaluated windows for 'demo-covariate-shift', expected 90 -- run `driftwatch demo covariate_shift` first if this doesn't match (loading a different scenario truncates every table)
+[PASS] no unexpected alerts: none
+[PASS] sustained global age shift fires and escalates: status=escalated
+[PASS] single-window blip is suppressed, never opens an alert: found 1 suppressed breach episode(s) on global age/psi: [SuppressedEpisode(kind='breach', start_window_id=81, end_window_id=81, length=1, peak_value=10.984995836898314)]
+
+$ driftwatch demo-verify segment_isolated
+[PASS] scenario is currently loaded in the database: found 55 evaluated windows for 'demo-segment-isolated', expected 55 -- run `driftwatch demo segment_isolated` first if this doesn't match (loading a different scenario truncates every table)
+[PASS] no unexpected alerts: none
+[PASS] global age PSI stays under the fire threshold throughout: max=0.042062398941161885, fire_threshold=0.25
+[PASS] APAC age psi alert opens, escalates, and (once the shift ends) resolves: status=resolved, opened at 1.188, escalated at 1.122
+[PASS] APAC age ks alert opens, escalates, and (once the shift ends) resolves: status=resolved, opened at 0.418, escalated at 0.429
+
+$ driftwatch demo-verify concept_drift
+[PASS] scenario is currently loaded in the database: found 60 evaluated windows for 'demo-concept-drift', expected 60 -- run `driftwatch demo concept_drift` first if this doesn't match (loading a different scenario truncates every table)
+[PASS] no unexpected alerts: none
+[PASS] no feature or prediction-score drift (inputs stay stable): none
+[PASS] global PR-AUC degrades and escalates after label_noise: status=escalated
+[PASS] PR-AUC healthy before label_noise, degraded after (final backfilled values): early_mean=0.8742190064665559, late_mean=0.38666833249467925, clear_threshold=0.65, fire_threshold=0.5
+[PASS] initial evaluation frequently lacks enough labels (degradation only visible after backfill): 60 windows initially not_computable for lack of labels
+
+$ driftwatch demo-verify burst_shift
+[PASS] scenario is currently loaded in the database: found 50 evaluated windows for 'demo-burst-shift', expected 50 -- run `driftwatch demo burst_shift` first if this doesn't match (loading a different scenario truncates every table)
+[PASS] no unexpected alerts: none
+[PASS] global age psi: the burst opens on its FIRST breaching window, escalates, and resolves: opened at window 20: True, status=resolved, opened at 0.327, escalated at 0.375
+[PASS] global age psi: the one-window blip opens (aggressive does not suppress it) and resolves without escalating: status=resolved, never escalated
+[PASS] global age ks: the burst opens on its FIRST breaching window, escalates, and resolves: opened at window 20: True, status=resolved, opened at 0.239, escalated at 0.244
+[PASS] global age ks: the one-window blip opens (aggressive does not suppress it) and resolves without escalating: status=resolved, never escalated
+
