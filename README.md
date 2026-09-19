@@ -11,9 +11,10 @@ when something degrades.
 [![CI](https://github.com/i-hridaysaha/driftwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/i-hridaysaha/driftwatch/actions/workflows/ci.yml)
 
 📄 **Full write-up:** https://www.hridaysaha.com/projects-1/drift-watch%3A-ml-model-monitoring-service
+🕹️ **Interactive demo:** https://claude.ai/artifact/3o7Afdwm3v29RxkBsNhtEX — every scenario below, charted per window from one real run, with the alert lifecycle replayable window by window.
 
-The dashboard is a local Streamlit app, not a hosted demo — the reproducible
-proof lives in the seeded scenarios below.
+The dashboard is a local Streamlit app; the demo page is a static snapshot of
+one run of it, and the reproducible proof lives in the seeded scenarios below.
 
 ## Results
 
@@ -142,21 +143,6 @@ Cramér's V, which is how that floor got added).
 ## Approach
 
 ![Predictions, labels and baseline registrations enter through one FastAPI endpoint into an append-only Postgres store. A scheduler drives the drift path, label ingestion drives the performance path, both feed an alert state machine, results and alert rows are written back to the store, notifications leave on status transitions, and a read-only dashboard reads the store directly.](figures/03_architecture.png)
-
-```
-model → POST predictions / labels / baseline (FastAPI, schema-validated, X-API-Key) → Postgres (append-only)
-                                                      │
-     scheduler tick: windows past the watermark ─────┤──── labels flag the windows they touch
-                                                      ▼                          ▼
-   drift path: PSI · KS · chi-square · JSD, sealed once    performance path: recomputed by the next tick
-   (each refused below its sampling-noise floor)           (pr_auc / precision / recall)
-                                                      │                          │
-                        stateful alerting (open → escalated → resolved, hysteresis, dead zone)
-                                                      │
-                  drift results, performance results and alert rows written back to Postgres
-                        │                                              │
-   notifications (log, webhook; on transition, retried per tick)   read-only dashboard (reads Postgres)
-```
 
 Per-model behaviour — feature schema, drift thresholds, segments, alert
 sensitivity — comes entirely from YAML config, never from branching code. The

@@ -417,7 +417,7 @@ def architecture() -> None:
     dash = node(pos5[0][0], y5, pos5[0][1], nh, "read-only dashboard",
                 "SET TRANSACTION READ ONLY,\nURL is the full chart spec")
     notif = node(pos5[1][0], y5, pos5[1][1], nh, "notifications",
-                 "log and generic webhook, on a status\ntransition only, no retry")
+                 "log and generic webhook, on a status\ntransition, retried up to five ticks")
     arrow(ax, notif["cx"], eng["bot"], notif["cx"], notif["top"], color=C_OUT, lw=2.0, ms=15)
     oarrow(ax, [(hub["L"], hub["cy"]), (LX, hub["cy"]), (LX, dash["cy"]), (dash["L"], dash["cy"])],
            color=C_OUT, lw=1.8, ms=14)
