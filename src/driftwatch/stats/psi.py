@@ -2,6 +2,8 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import numpy as np
+
 from driftwatch.stats.binning import bucket_proportions
 from driftwatch.stats.result import StatStatus
 
@@ -138,3 +140,121 @@ def psi_null_floor(n_baseline: int, n_live: int, n_buckets: int) -> PSINullFloor
     mean = degrees * k
     sd = math.sqrt(2.0 * degrees) * k
     return PSINullFloor(mean=mean, sd=sd, ceiling=mean + 2.0 * sd)
+
+
+# ---------------------------------------------------------------------------
+# The empirical null: PSI's sampling noise measured on the baseline itself
+# ---------------------------------------------------------------------------
+
+NULL_FLOOR_GRID: tuple[int, ...] = (
+    10, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000,
+)
+"""Live-sample sizes the null is simulated at when a baseline is registered.
+A window's actual live size is looked up by log-linear interpolation
+between these (psi_null_ceiling_from_table)."""
+
+NULL_FLOOR_DRAWS = 200
+NULL_FLOOR_SEED = 0
+NULL_FLOOR_PERCENTILE = 97.5
+
+
+def _bucket_proportions_array(values: np.ndarray, edges: Sequence[float]) -> np.ndarray:
+    """bucket_proportions() on an array, bit-for-bit the same bucketing:
+    bucket 0 is below the range, len(edges) above it, and a value equal to
+    the last edge counts as inside (see driftwatch.stats.binning
+    ._assign_bucket)."""
+    idx = np.searchsorted(np.asarray(edges, dtype=float), values, side="right")
+    idx[values == edges[-1]] = len(edges) - 1
+    counts = np.bincount(idx, minlength=len(edges) + 1).astype(float)
+    return counts / len(values)
+
+
+def _psi_from_proportions(baseline_props: np.ndarray, live_props: np.ndarray) -> float:
+    b = np.maximum(baseline_props, EPSILON)
+    live = np.maximum(live_props, EPSILON)
+    return float(np.sum((live - b) * np.log(live / b)))
+
+
+def _jsd_from_proportions(baseline_props: np.ndarray, live_props: np.ndarray) -> float:
+    """driftwatch.stats.jsd.jsd on proportions: squared Jensen-Shannon
+    distance, base 2, exactly as that module computes it."""
+    from scipy.spatial.distance import jensenshannon
+
+    return float(jensenshannon(baseline_props, live_props, base=2)) ** 2
+
+
+BUCKET_STATISTICS = {"psi": _psi_from_proportions, "jsd": _jsd_from_proportions}
+
+
+def simulate_psi_null(
+    baseline_values: Sequence[float],
+    edges: Sequence[float],
+    live_sizes: Sequence[int] = NULL_FLOOR_GRID,
+    draws: int = NULL_FLOOR_DRAWS,
+    seed: int = NULL_FLOOR_SEED,
+    statistic: str = "psi",
+) -> dict[str, list[float]]:
+    """What PSI (or, with statistic="jsd", the prediction-score JSD) reads,
+    under NO shift, for THIS baseline slice and THESE frozen edges, at each
+    live size in `live_sizes`: the empirical counterpart of
+    psi_null_floor(), and the one the evaluation pipeline prefers when a
+    baseline carries it.
+
+    Both sides are resampled with replacement from the baseline slice --
+    the baseline side at its own size, the live side at the grid size -- so
+    the table includes the baseline's own sampling term, the epsilon floor's
+    behaviour on empty bins, and whatever shape the real feature has, none
+    of which the chi-square approximation sees. Computed once at baseline
+    registration with a fixed seed, stored in the baseline's binning
+    config, never recomputed per window.
+
+    Returns {"sizes": [...], "mean": [...], "ceiling": [...]}, where
+    `ceiling` is the 97.5th percentile of the draws at that size: the level
+    a quiet window stays under about 97.5 percent of the time, which is the
+    quantity a clear threshold has to sit above.
+    """
+    base = np.asarray(baseline_values, dtype=float)
+    if base.size == 0 or not edges:
+        return {"sizes": [], "mean": [], "ceiling": []}
+    stat = BUCKET_STATISTICS[statistic]
+    rng = np.random.default_rng(seed)
+    sizes: list[float] = []
+    means: list[float] = []
+    ceilings: list[float] = []
+    for n_live in live_sizes:
+        values = np.empty(draws)
+        for d in range(draws):
+            base_draw = rng.choice(base, size=base.size, replace=True)
+            live_draw = rng.choice(base, size=n_live, replace=True)
+            values[d] = stat(
+                _bucket_proportions_array(base_draw, edges),
+                _bucket_proportions_array(live_draw, edges),
+            )
+        sizes.append(float(n_live))
+        means.append(float(values.mean()))
+        ceilings.append(float(np.percentile(values, NULL_FLOOR_PERCENTILE)))
+    # The true ceiling can only fall as the live sample grows; with a finite
+    # number of draws adjacent grid points can invert by noise, so each is
+    # raised to the largest ceiling at any bigger size. Conservative, and
+    # monotone, which is what interpolation between grid points assumes.
+    for i in range(len(ceilings) - 2, -1, -1):
+        ceilings[i] = max(ceilings[i], ceilings[i + 1])
+    return {"sizes": sizes, "mean": means, "ceiling": ceilings}
+
+
+def psi_null_ceiling_from_table(table: dict[str, list[float]], n_live: int) -> float | None:
+    """The simulated ceiling at `n_live`, interpolated log-linearly in the
+    live size between grid points and clamped to the grid's ends (below the
+    smallest size the smallest size's ceiling is used, which understates the
+    noise there; the profiles' minimum window and segment sizes keep
+    evaluation above it). None if the table is empty."""
+    sizes = table.get("sizes") or []
+    ceilings = table.get("ceiling") or []
+    if not sizes or len(sizes) != len(ceilings):
+        return None
+    n = float(max(n_live, 1))
+    if n <= sizes[0]:
+        return float(ceilings[0])
+    if n >= sizes[-1]:
+        return float(ceilings[-1])
+    return float(np.interp(math.log(n), np.log(sizes), ceilings))

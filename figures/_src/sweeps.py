@@ -31,8 +31,13 @@ import numpy as np  # noqa: E402
 from driftwatch.demo.generator import generate_scenario_data  # noqa: E402
 from driftwatch.demo.loader import load_scenario  # noqa: E402
 from driftwatch.stats.binning import compute_continuous_edges  # noqa: E402
+from driftwatch.stats.floors import ks_null_ceiling  # noqa: E402
 from driftwatch.stats.ks import ks  # noqa: E402
-from driftwatch.stats.psi import psi, psi_null_floor  # noqa: E402
+from driftwatch.stats.psi import (  # noqa: E402
+    psi,
+    psi_null_ceiling_from_table,
+    simulate_psi_null,
+)
 
 PSI_FIRE, PSI_CLEAR = 0.25, 0.15  # patient.yaml
 KS_FIRE, KS_CLEAR = 0.3, 0.15
@@ -85,19 +90,26 @@ def traces(scenario, feature: str, segment: str | None, data=None, ignore_floor=
             continue
         by_window[int((p.predicted_at - t0).total_seconds() // hours)].append(v)
     psi_vals, ks_vals, refused = [], [], 0
-    n_buckets = len(edges) + 1
+    # the same floor the pipeline applies: simulated on the baseline slice
+    # with the frozen edges (driftwatch.stats.binning stores this table at
+    # registration; here it is computed on the fly for the slice in hand)
+    table = None if ignore_floor else simulate_psi_null(base, edges)
     for w in sorted(by_window):
         live = by_window[w]
-        if not ignore_floor and psi_null_floor(len(base), len(live), n_buckets).ceiling > PSI_CLEAR:
+        ceiling = psi_null_ceiling_from_table(table, len(live)) if table else None
+        if ceiling is not None and ceiling > PSI_CLEAR:
             psi_vals.append(None)
             refused += 1
         else:
             psi_vals.append(psi(base, live, edges).value)
-        ks_vals.append(ks(base, live).statistic)
+        if not ignore_floor and ks_null_ceiling(len(base), len(live)) > KS_CLEAR:
+            ks_vals.append(None)
+        else:
+            ks_vals.append(ks(base, live).statistic)
     return psi_vals, ks_vals, refused
 
 
-def false_open_sweep(seeds=range(2000, 2040), volume=None, ignore_floor=False) -> None:
+def false_open_sweep(seeds=range(2000, 2040), volume=None, ignore_floor=False) -> int:
     base = load_scenario("segment_isolated")
     if volume is not None:
         base = base.model_copy(
@@ -123,6 +135,7 @@ def false_open_sweep(seeds=range(2000, 2040), volume=None, ignore_floor=False) -
             t[1] += opens("".join(classify(v, KS_FIRE, KS_CLEAR) for v in ks_vals))
             t[2] += refused
             t[3] += len(psi_vals)
+    spurious = 0
     for (feature, segment), (psi_opens, ks_opens, refused_total, windows_total) in tally.items():
         where = "global" if segment is None else f"{segment} segment"
         print(
@@ -130,6 +143,8 @@ def false_open_sweep(seeds=range(2000, 2040), volume=None, ignore_floor=False) -
             f"{refused_total} of {windows_total} |"
         )
         print(f"| `{feature}`, {where}, KS D | {ks_opens} of {len(seeds)} | not applicable |")
+        spurious += psi_opens + ks_opens
+    return spurious
 
 
 def share_magnitude_sweep() -> None:
@@ -170,9 +185,12 @@ def share_magnitude_sweep() -> None:
                     else "quiet"
                 )
             )
-            s_ks_alert = (
-                "opens" if opens("".join(classify(v, KS_FIRE, KS_CLEAR) for v in s_ks)) else "quiet"
-            )
+            if all(v is None for v in s_ks):
+                s_ks_alert = "refused (below floor)"
+            elif opens("".join(classify(v, KS_FIRE, KS_CLEAR) for v in s_ks)):
+                s_ks_alert = "opens"
+            else:
+                s_ks_alert = "quiet"
             g_alert = (
                 "opens"
                 if opens("".join(classify(v, PSI_FIRE, PSI_CLEAR) for v in g_psi))
@@ -212,10 +230,16 @@ def trace_before() -> None:
 
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    strict = "--assert" in sys.argv
     if which in ("all", "trace-before"):
         trace_before()
     if which in ("all", "clean"):
-        false_open_sweep()
+        spurious = false_open_sweep()
+        if strict and spurious:
+            # CI runs this: the false-open rate at the shipped geometry is a
+            # tested property of the release, not a number typed into a page
+            print(f"FAIL: {spurious} spurious alert open(s) on clean data", file=sys.stderr)
+            sys.exit(1)
     if which in ("all", "clean-before"):
         # the geometry the case study was first drafted on, 500 per window
         # against 1500, with PSI gated regardless of its floor

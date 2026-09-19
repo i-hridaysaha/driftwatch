@@ -3,14 +3,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from driftwatch.alerting.notifications import default_channels, notify_if_needed
 from driftwatch.api.deps import get_db
 from driftwatch.config.loader import ModelConfigNotFoundError, load_model_config
-from driftwatch.db.models import Alert, EvaluationWindow, Label, Model, Prediction
-from driftwatch.evaluation.performance import recompute_performance_for_window
+from driftwatch.db.models import EvaluationWindow, Label, Model, Prediction
 from driftwatch.hashing import compute_payload_hash
 
 router = APIRouter()
@@ -33,7 +31,12 @@ class LabelIngestRequest(BaseModel):
 class LabelIngestResponse(BaseModel):
     inserted: int
     skipped_duplicate: int
-    windows_recomputed: list[int]
+    windows_flagged: list[int]
+    """Evaluation windows this batch touched, flagged `performance_stale`
+    for the scheduler to recompute on its next tick. The request does no
+    recomputation, alert evaluation or notification itself: a month of
+    labels for hourly windows would otherwise do all three for ~720 windows
+    inside one request and one transaction."""
 
 
 def _payload(record: LabelIn) -> dict[str, Any]:
@@ -113,17 +116,19 @@ def ingest_labels(
             touched_window_ids.add(window.id)
 
     db.flush()
-    channels = default_channels()
-    for window_id in touched_window_ids:
-        recompute_performance_for_window(db, window_id)
-        touched_alerts = db.scalars(
-            select(Alert).where(Alert.last_seen_window_id == window_id)
-        ).all()
-        for alert in touched_alerts:
-            notify_if_needed(alert, channels)
+    if touched_window_ids:
+        # Flagged in the same transaction as the labels, so the scheduler can
+        # never see the flag without the labels behind it. The scheduler
+        # clears it when it claims the window; a batch landing mid-recompute
+        # sets it again and the window is recomputed once more next tick.
+        db.execute(
+            update(EvaluationWindow)
+            .where(EvaluationWindow.id.in_(touched_window_ids))
+            .values(performance_stale=True)
+        )
 
     return LabelIngestResponse(
         inserted=inserted,
         skipped_duplicate=skipped,
-        windows_recomputed=sorted(touched_window_ids),
+        windows_flagged=sorted(touched_window_ids),
     )

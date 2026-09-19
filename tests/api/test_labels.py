@@ -4,7 +4,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from driftwatch.alerting.notifications import LoggingNotificationChannel
 from driftwatch.db.models import Baseline, EvaluationWindow, PerformanceResult
+from driftwatch.scheduler.jobs import recompute_stale_windows
 
 VALID_FEATURES = {"age": 30, "region": "EU", "income": 50000}
 
@@ -49,7 +51,7 @@ def test_ingest_labels_happy_path_without_window(client: TestClient) -> None:
     )
 
     assert response.status_code == 201
-    assert response.json() == {"inserted": 1, "skipped_duplicate": 0, "windows_recomputed": []}
+    assert response.json() == {"inserted": 1, "skipped_duplicate": 0, "windows_flagged": []}
 
 
 def test_ingest_labels_unknown_prediction_returns_422(client: TestClient) -> None:
@@ -80,7 +82,7 @@ def test_resending_identical_label_is_idempotent(client: TestClient) -> None:
     second = client.post("/models/example-model/labels", json={"labels": [label]})
 
     assert first.json()["inserted"] == 1
-    assert second.json() == {"inserted": 0, "skipped_duplicate": 1, "windows_recomputed": []}
+    assert second.json() == {"inserted": 0, "skipped_duplicate": 1, "windows_flagged": []}
 
 
 def test_different_label_value_is_a_correction_not_a_conflict(client: TestClient) -> None:
@@ -110,9 +112,13 @@ def test_different_label_value_is_a_correction_not_a_conflict(client: TestClient
     assert second.json()["inserted"] == 1
 
 
-def test_label_batch_triggers_recompute_once_per_affected_window(
+def test_label_batch_flags_the_window_and_the_scheduler_recomputes_it(
     client: TestClient, db_session: Session
 ) -> None:
+    """The request flags; the scheduler does the work. Nothing is recomputed
+    inside the ingestion request, so a month of labels costs the request
+    one UPDATE per touched window rather than a recompute, an alert
+    evaluation and a notification round each."""
     _register_baseline(client)
     window_start = datetime(2026, 1, 1, tzinfo=UTC)
     window_end = window_start + timedelta(hours=1)
@@ -152,7 +158,24 @@ def test_label_batch_triggers_recompute_once_per_affected_window(
     )
 
     assert response.status_code == 201
-    assert response.json()["windows_recomputed"] == [window_id]
+    assert response.json()["windows_flagged"] == [window_id]
+
+    db_session.expire_all()
+    flagged = db_session.get(EvaluationWindow, window_id)
+    assert flagged is not None and flagged.performance_stale is True
+    assert (
+        db_session.scalars(
+            select(PerformanceResult).where(PerformanceResult.evaluation_window_id == window_id)
+        ).all()
+        == []
+    )  # the request itself recomputed nothing
+
+    recomputed = recompute_stale_windows(db_session, [LoggingNotificationChannel()])
+    assert recomputed == 1
+    db_session.expire_all()
+    cleared = db_session.get(EvaluationWindow, window_id)
+    assert cleared is not None and cleared.performance_stale is False
+    assert recompute_stale_windows(db_session, [LoggingNotificationChannel()]) == 0
 
     performance_rows = db_session.scalars(
         select(PerformanceResult).where(PerformanceResult.evaluation_window_id == window_id)

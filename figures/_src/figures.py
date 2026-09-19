@@ -86,9 +86,9 @@ BANNER_TAGLINE = "Separating data drift from performance decay, and alerting onl
 
 # ---- numbers that come from the database, pinned with their provenance ----
 # `driftwatch demo-verify concept_drift`, quoted verbatim in README.md:
-#   PR-AUC healthy before label_noise, degraded after: early_mean=0.874, late_mean=0.386
-#   degradation only visible after backfill: 57 windows initially not_computable
-PR_AUC_BEFORE, PR_AUC_AFTER, NOT_COMPUTABLE_WINDOWS = 0.874, 0.386, 57
+#   PR-AUC healthy before label_noise, degraded after: early_mean=0.874, late_mean=0.387
+#   degradation only visible after backfill: 60 windows initially not_computable
+PR_AUC_BEFORE, PR_AUC_AFTER, NOT_COMPUTABLE_WINDOWS = 0.874, 0.387, 60
 # figures/_src/sweeps.py, `clean`: forty clean seeds at the shipped segment geometry
 CLEAN_SEEDS, CLEAN_SPURIOUS_OPENS = 40, 0
 # patient.yaml, the profile every shipped scenario runs under
@@ -222,7 +222,7 @@ def banner(trace: SegmentTrace, n_tests: int, n_files: int) -> None:
     ax.text(6, Y - 19.5, BANNER_TAGLINE, fontsize=13, color="#D8D5CC", ha="left", va="center",
             zorder=Z_LABEL)
     stats = [
-        ("4", "seeded scenarios, each verified in CI"),
+        ("5", "seeded scenarios, each verified at three seeds in CI"),
         (str(n_tests), f"tests across {n_files} files"),
         ("2", "independent clocks per window"),
         (f"{CLEAN_SPURIOUS_OPENS} of {CLEAN_SEEDS}", "clean seeds opening a spurious alert"),
@@ -576,7 +576,7 @@ if __name__ == "__main__":
         "Project metrics",
         "every figure here is re-derived from the database by a verifier on each run",
         [
-            ("4", "seeded scenarios, all verified"),
+            ("5", "seeded scenarios, verified at three seeds"),
             (str(n_tests), f"tests across {n_files} files"),
             (f"{max(trace.global_psi):.3f} vs {max(trace.segment_psi):.2f}",
              "global against segment drift, same feature, same windows"),

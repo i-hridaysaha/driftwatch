@@ -2,8 +2,13 @@ import logging
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+from driftwatch.alerting.notifications import default_channels
 from driftwatch.db.session import SessionLocal
-from driftwatch.scheduler.jobs import evaluate_pending_windows
+from driftwatch.scheduler.jobs import (
+    evaluate_pending_windows,
+    recompute_stale_windows,
+    retry_pending_notifications,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -11,10 +16,24 @@ TICK_INTERVAL_MINUTES = 5
 
 
 def run_evaluation_tick() -> None:
+    """One tick, three jobs, in this order: seal any window whose drift
+    watermark has elapsed; recompute performance for every window label
+    ingestion has flagged since the last tick; retry any alert transition
+    whose delivery failed. Performance therefore lags a label batch by at
+    most one tick, which is the price of keeping recomputation out of the
+    request that carried the labels."""
     session = SessionLocal()
+    channels = default_channels()
     try:
-        count = evaluate_pending_windows(session)
-        logger.info("evaluated %d window(s)", count)
+        evaluated = evaluate_pending_windows(session)
+        recomputed = recompute_stale_windows(session, channels)
+        retried = retry_pending_notifications(session, channels)
+        logger.info(
+            "evaluated %d window(s), recomputed %d stale window(s), retried %d notification(s)",
+            evaluated,
+            recomputed,
+            retried,
+        )
     finally:
         session.close()
 

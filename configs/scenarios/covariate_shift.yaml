@@ -14,13 +14,17 @@ start_date: "2026-01-01T00:00:00Z"
 window: "1h"
 stable_windows: 32
 total_windows: 90
-# 700 per window against a 2000-row baseline, the same volume as clean and
-# concept_drift: at 500/1500 the 30% APAC segment saw about 150 rows against
-# 450, where PSI's sampling-noise ceiling (about 0.18, see
-# driftwatch.stats.psi.psi_null_floor) exceeds the patient profile's 0.15
-# clear threshold and PSI is refused as not_computable for that segment.
-predictions_per_window: 700
-baseline_size: 2000
+# 1200 per window against a 3600-row baseline, the same volume as clean and
+# concept_drift. Sized so that every statistic the patient profile gates
+# on clears its sampling-noise ceiling inside a 30% segment (about 360 live
+# rows against 1080): PSI's simulated ceiling sits near 0.08 against the
+# 0.15 clear threshold, and a six-category feature's Cramer's V ceiling,
+# sqrt(chi2_{6, 0.975} / N) with N the segment plus its baseline slice,
+# needs N above about 640. At the earlier 700/2000 the segment had 810
+# rows for that, but PSI's ceiling sat at the threshold and low-draw windows
+# were refused. See driftwatch.stats.floors and driftwatch.stats.psi.
+predictions_per_window: 1200
+baseline_size: 3600
 prediction_type: binary_classification
 prediction_distribution: {type: beta, a: 0.4, b: 0.4}
 
@@ -42,7 +46,7 @@ features:
   - name: device_id
     dtype: categorical
     nullable: false
-    cardinality: 15
+    cardinality: 6
 
 segments: [region]
 min_segment_size: 30

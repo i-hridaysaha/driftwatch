@@ -142,6 +142,16 @@ class EvaluationWindow(Base):
     label_watermark: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     n_predictions: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     n_labels: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    performance_stale: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    """Set by label ingestion, in the same transaction as the labels, when a
+    batch touches this window; cleared by the scheduler when it claims the
+    window for a performance recompute (driftwatch.scheduler.jobs
+    .recompute_stale_windows). A label landing during the recompute sets it
+    again, so the window is simply recomputed once more on the next tick.
+    This is what keeps a month-long label backfill out of the request path:
+    the request flags, the scheduler does the work."""
     late_prediction_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     """Predictions ingested after this window's drift was already evaluated,
     whose predicted_at falls inside [window_start, window_end) anyway.
@@ -340,6 +350,14 @@ class Alert(Base):
     last_notification_error_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    notification_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    """Failed delivery rounds for the CURRENT status. A failed round leaves
+    last_notified_status behind the real status, so the scheduler retries
+    the transition on its next tick (driftwatch.scheduler.jobs
+    .retry_pending_notifications), up to MAX_NOTIFICATION_ATTEMPTS; a
+    successful round resets this to 0. An alert that opens while the
+    webhook is down therefore still reaches someone once it is back, rather
+    than being logged once and forgotten."""
 
     # Aggregation: when more new alerts would open in one run than
     # AlertingConfig.max_alerts_per_run, they're rolled into one row like this

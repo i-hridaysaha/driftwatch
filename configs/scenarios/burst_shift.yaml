@@ -1,0 +1,81 @@
+# The one scenario that runs under the AGGRESSIVE profile, so both shipped
+# profiles are exercised end to end (the patient profile by the other four).
+# Two events on the same feature, both global: a four-window burst at
+# window 20, which under aggressive opens on its FIRST breaching window,
+# escalates on the third and resolves two clear windows after it ends; and
+# a single-window blip at window 40, which the patient profile would
+# suppress (see covariate_shift) and aggressive, by design, opens and then
+# resolves two windows later. That second alert is the profile's stated
+# trade: quick churn in exchange for catching a real shift fast.
+#
+# Volume matches segment_isolated (2000 a window against a 6000-row
+# baseline). Aggressive's PSI clear threshold is 0.07, so a segment needs
+# roughly 600 live rows against 1800 for its simulated PSI null ceiling to
+# clear it; at 30 percent of 2000 each region has that with margin.
+name: burst_shift
+description: >
+  Two global mean shifts on one feature under the aggressive profile: a
+  four-window burst that opens at once, escalates and resolves, and a
+  one-window blip that aggressive deliberately opens and resolves rather
+  than suppressing.
+model_id: demo-burst-shift
+profile: aggressive
+seed: 1005
+start_date: "2026-01-01T00:00:00Z"
+window: "1h"
+stable_windows: 20
+total_windows: 50
+predictions_per_window: 2000
+baseline_size: 6000
+prediction_type: binary_classification
+prediction_distribution: {type: beta, a: 0.4, b: 0.4}
+
+features:
+  - name: age
+    dtype: continuous
+    nullable: false
+    distribution: {type: normal, mean: 40, std: 12}
+  - name: income
+    dtype: continuous
+    nullable: true
+    missing_rate: 0.05
+    distribution: {type: lognormal, mean: 10.5, sigma: 0.6}
+  - name: region
+    dtype: categorical
+    nullable: false
+    categories: [EU, US, APAC]
+    weights: [0.36, 0.34, 0.3]
+  # No device_id here. The first run of this scenario carried a fifteen-
+  # category device_id and opened a Cramer's V drift alert on it inside the
+  # APAC segment on pure sampling noise: for a 2 x 16 table at about 600
+  # live rows against 1800, V's null 97.5th percentile is roughly 0.107,
+  # above aggressive's 0.1 fire threshold. That is what put the Cramer's V
+  # floor into the pipeline (driftwatch.stats.floors). With the floor, a
+  # six-category feature needs about 3,000 rows (segment plus its baseline
+  # slice) before its ceiling clears the 0.07 clear threshold, and a 30
+  # percent segment at this volume has 2,400: the pipeline would refuse to
+  # gate on it and, after two windows, raise a silence alert for every
+  # segment, which is the right behaviour for a real deployment and the
+  # wrong story for this scenario.
+
+segments: [region]
+min_segment_size: 30
+
+label_base_noise_rate: 0.05
+label_delay:
+  median_hours: 6
+  sigma: 0.7
+  max_hours: 72
+  early_cutoff_hours: 6
+
+events:
+  - feature: age
+    shift_type: mean_shift
+    magnitude: 0.6
+    start_window: 20
+    duration_windows: 4
+  - feature: age
+    shift_type: mean_shift
+    magnitude: 0.6
+    start_window: 40
+    duration_windows: 1

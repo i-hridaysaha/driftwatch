@@ -3,9 +3,22 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from driftwatch.alerting.notifications import MAX_NOTIFICATION_ATTEMPTS
 from driftwatch.config.loader import load_model_config
-from driftwatch.db.models import Baseline, EvaluationWindow, Model, Prediction
-from driftwatch.scheduler.jobs import evaluate_pending_windows, find_drift_ready_unevaluated_windows
+from driftwatch.db.models import (
+    Alert,
+    AlertKind,
+    AlertStatus,
+    Baseline,
+    EvaluationWindow,
+    Model,
+    Prediction,
+)
+from driftwatch.scheduler.jobs import (
+    evaluate_pending_windows,
+    find_drift_ready_unevaluated_windows,
+    retry_pending_notifications,
+)
 from driftwatch.stats.binning import compute_baseline_binning
 
 MODEL_ID = "example-model"
@@ -136,3 +149,65 @@ def test_evaluate_pending_windows_skips_inactive_models(db_session: Session) -> 
     count = evaluate_pending_windows(db_session, as_of=start_hour + timedelta(hours=2))
 
     assert count == 0
+
+
+class _FlakyChannel:
+    """Fails the first `failures` rounds, then delivers: a webhook outage."""
+
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.delivered: list[tuple[int, str]] = []
+
+    def notify(self, alert: Alert, event: str) -> None:
+        if self.failures > 0:
+            self.failures -= 1
+            raise RuntimeError("webhook unreachable")
+        self.delivered.append((alert.id, event))
+
+
+def test_retry_pending_notifications_delivers_once_the_webhook_is_back(
+    db_session: Session,
+) -> None:
+    """An alert whose opening notification failed is picked up by the
+    scheduler's retry job on later ticks until it is delivered, then never
+    again for that status."""
+    db_session.add(Model(model_id=MODEL_ID))
+    db_session.flush()
+    alert = Alert(
+        model_id=MODEL_ID,
+        kind=AlertKind.DRIFT,
+        signal_name="psi",
+        feature_name="age",
+        status=AlertStatus.OPEN,
+    )
+    db_session.add(alert)
+    db_session.flush()
+    channel = _FlakyChannel(failures=2)
+
+    assert retry_pending_notifications(db_session, [channel]) == 1  # tick 1: fails
+    assert alert.notification_attempts == 1 and alert.last_notified_status is None
+    assert retry_pending_notifications(db_session, [channel]) == 1  # tick 2: fails
+    assert retry_pending_notifications(db_session, [channel]) == 1  # tick 3: delivered
+    assert channel.delivered == [(alert.id, "opened")]
+    assert alert.last_notified_status == AlertStatus.OPEN
+    assert alert.notification_attempts == 0
+    assert retry_pending_notifications(db_session, [channel]) == 0  # nothing pending
+
+
+def test_retry_pending_notifications_skips_alerts_that_exhausted_their_attempts(
+    db_session: Session,
+) -> None:
+    db_session.add(Model(model_id=MODEL_ID))
+    db_session.flush()
+    alert = Alert(
+        model_id=MODEL_ID,
+        kind=AlertKind.DRIFT,
+        signal_name="psi",
+        feature_name="age",
+        status=AlertStatus.OPEN,
+        notification_attempts=MAX_NOTIFICATION_ATTEMPTS,
+    )
+    db_session.add(alert)
+    db_session.flush()
+
+    assert retry_pending_notifications(db_session, [_FlakyChannel(failures=0)]) == 0

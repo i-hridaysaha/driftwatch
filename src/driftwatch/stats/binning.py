@@ -94,17 +94,34 @@ def compute_baseline_binning(
     prediction_scores: Sequence[float | None],
     schema: ModelSchemaSpec,
     n_bins: int = DEFAULT_N_BINS,
+    segment_dimensions: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Compute and freeze the binning configuration for a newly registered
     baseline. Called exactly once, at registration -- never re-derived from
     live data, so drift test results stay comparable across the baseline's
-    entire lifetime."""
+    entire lifetime.
+
+    Alongside the edges, every continuous feature carries its PSI null
+    floor, simulated on this baseline with these edges
+    (driftwatch.stats.psi.simulate_psi_null): globally under
+    features[name]["null_floor"], and per segment slice under
+    segments[dimension][value]["features"][name]["null_floor"], for each
+    dimension in `segment_dimensions` (which are declared features, so the
+    slice is by that feature's value). The evaluation pipeline reads the
+    ceiling at a window's live size from here before it gates on PSI, and
+    falls back to the chi-square approximation for a baseline registered
+    without a table."""
+    from driftwatch.stats.psi import simulate_psi_null  # psi imports this module's bucketing
+
     feature_bins: dict[str, Any] = {}
     for feature in schema.features:
         raw_values = [record.get(feature.name) for record in features]
         present = [v for v in raw_values if v is not None]
         if feature.dtype == "continuous":
-            feature_bins[feature.name] = _continuous_bin_entry([float(v) for v in present], n_bins)
+            floats = [float(v) for v in present]
+            entry = _continuous_bin_entry(floats, n_bins)
+            entry["null_floor"] = simulate_psi_null(floats, entry["edges"])
+            feature_bins[feature.name] = entry
         else:
             feature_bins[feature.name] = {
                 "type": "categorical",
@@ -113,5 +130,78 @@ def compute_baseline_binning(
 
     scores = [score for score in prediction_scores if score is not None]
     prediction_bins = _continuous_bin_entry(scores, n_bins)
+    prediction_bins["null_floor"] = simulate_psi_null(
+        scores, prediction_bins["edges"], statistic="jsd"
+    )
 
-    return {"features": feature_bins, "prediction_score": prediction_bins}
+    segments: dict[str, Any] = {}
+    for dimension in segment_dimensions:
+        values = sorted({str(r[dimension]) for r in features if r.get(dimension) is not None})
+        segments[dimension] = {}
+        for value in values:
+            in_slice = [str(r.get(dimension)) == value for r in features]
+            slice_records = [r for r, keep in zip(features, in_slice, strict=True) if keep]
+            slice_features: dict[str, Any] = {}
+            for feature in schema.features:
+                if feature.dtype != "continuous" or feature.name == dimension:
+                    continue
+                floats = [
+                    float(r[feature.name]) for r in slice_records if r.get(feature.name) is not None
+                ]
+                edges = feature_bins[feature.name]["edges"]  # the GLOBAL frozen edges
+                slice_features[feature.name] = {"null_floor": simulate_psi_null(floats, edges)}
+            slice_scores = [
+                score
+                for score, keep in zip(prediction_scores, in_slice, strict=True)
+                if keep and score is not None
+            ]
+            segments[dimension][value] = {
+                "features": slice_features,
+                "prediction_score": {
+                    "null_floor": simulate_psi_null(
+                        slice_scores, prediction_bins["edges"], statistic="jsd"
+                    )
+                },
+            }
+
+    return {"features": feature_bins, "prediction_score": prediction_bins, "segments": segments}
+
+
+def prediction_score_null_floor_table(
+    binning: Mapping[str, Any], segment_dimension: str | None, segment_value: str | None
+) -> dict[str, list[float]] | None:
+    """The simulated JSD null table for the prediction score, globally or in
+    one segment slice, or None when the baseline predates the tables."""
+    if segment_dimension is None:
+        entry = binning.get("prediction_score", {})
+    else:
+        entry = (
+            binning.get("segments", {})
+            .get(segment_dimension, {})
+            .get(str(segment_value), {})
+            .get("prediction_score", {})
+        )
+    table = entry.get("null_floor")
+    return table if table and table.get("sizes") else None
+
+
+def psi_null_floor_table(
+    binning: Mapping[str, Any],
+    feature_name: str,
+    segment_dimension: str | None,
+    segment_value: str | None,
+) -> dict[str, list[float]] | None:
+    """The simulated null-floor table for one feature, globally or in one
+    segment slice, or None when the baseline predates the tables."""
+    if segment_dimension is None:
+        entry = binning.get("features", {}).get(feature_name, {})
+    else:
+        entry = (
+            binning.get("segments", {})
+            .get(segment_dimension, {})
+            .get(str(segment_value), {})
+            .get("features", {})
+            .get(feature_name, {})
+        )
+    table = entry.get("null_floor")
+    return table if table and table.get("sizes") else None

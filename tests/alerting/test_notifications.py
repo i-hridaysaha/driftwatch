@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from driftwatch.alerting.notifications import (
+    MAX_NOTIFICATION_ATTEMPTS,
     AlertEvent,
     LoggingNotificationChannel,
     notify_if_needed,
@@ -37,6 +38,7 @@ def _alert(status: AlertStatus, last_notified_status: AlertStatus | None = None)
         first_opened_at=datetime.now(UTC),
         last_seen_at=datetime.now(UTC),
         last_notified_status=last_notified_status,
+        notification_attempts=0,
     )
     return alert
 
@@ -118,13 +120,43 @@ def test_raising_channel_does_not_propagate_and_records_failure() -> None:
     dispatched = notify_if_needed(alert, [_RaisingChannel()])  # must not raise
 
     assert dispatched is True
-    # no retry loop: the transition is still marked notified even though
-    # delivery failed -- the failure is surfaced via last_notification_error,
-    # not by holding the alert in an un-notified state forever
-    assert alert.last_notified_status == AlertStatus.OPEN
+    # the transition is NOT marked delivered: last_notified_status stays
+    # behind the real status so the scheduler retries it next tick, and the
+    # failure is surfaced via last_notification_error meanwhile
+    assert alert.last_notified_status is None
+    assert alert.notification_attempts == 1
     assert alert.last_notification_error is not None
     assert "webhook unreachable" in alert.last_notification_error
     assert alert.last_notification_error_at is not None
+
+
+def test_failed_delivery_is_retried_then_delivered_once_the_channel_recovers() -> None:
+    alert = _alert(AlertStatus.OPEN, last_notified_status=None)
+    notify_if_needed(alert, [_RaisingChannel()])
+    notify_if_needed(alert, [_RaisingChannel()])
+    assert alert.notification_attempts == 2
+    assert alert.last_notified_status is None
+
+    good = _RecordingChannel()
+    notify_if_needed(alert, [good])  # the webhook is back
+
+    assert good.calls == [(1, "opened")]
+    assert alert.last_notified_status == AlertStatus.OPEN
+    assert alert.notification_attempts == 0
+    assert notify_if_needed(alert, [good]) is False  # delivered: no further rounds
+
+
+def test_retry_is_bounded_and_then_gives_up_with_the_error_on_the_row() -> None:
+    alert = _alert(AlertStatus.OPEN, last_notified_status=None)
+    for _ in range(MAX_NOTIFICATION_ATTEMPTS - 1):
+        notify_if_needed(alert, [_RaisingChannel()])
+        assert alert.last_notified_status is None
+    notify_if_needed(alert, [_RaisingChannel()])  # the last permitted attempt
+
+    assert alert.notification_attempts == MAX_NOTIFICATION_ATTEMPTS
+    assert alert.last_notified_status == AlertStatus.OPEN  # given up: marked delivered
+    assert alert.last_notification_error is not None
+    assert notify_if_needed(alert, [_RaisingChannel()]) is False  # no unbounded backlog
 
 
 def test_one_raising_channel_does_not_block_the_others() -> None:
@@ -160,5 +192,6 @@ def test_raising_channel_leaves_alert_transaction_committed(db_session: Session)
     persisted = db_session.get(Alert, alert_id)
     assert persisted is not None
     assert persisted.status == AlertStatus.OPEN
-    assert persisted.last_notified_status == AlertStatus.OPEN
+    assert persisted.last_notified_status is None  # still pending, to be retried
+    assert persisted.notification_attempts == 1
     assert persisted.last_notification_error is not None

@@ -2,7 +2,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from driftwatch.api.deps import get_db
@@ -25,6 +25,12 @@ class BaselineRegisterRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     records: list[BaselineRecordIn] = Field(min_length=1)
+    replace_active: bool = False
+    """Registering a baseline for a model that already has an active one
+    deactivates the old one, and every drift number from then on is measured
+    against the new one. That is not something a stray request should do:
+    it is refused with 409 unless this is set, so a caller has to say it
+    meant it."""
 
 
 class BaselineRegisterResponse(BaseModel):
@@ -56,6 +62,19 @@ def register_baseline(
         db.add(Model(model_id=model_id))
         db.flush()
 
+    active = db.scalars(
+        select(Baseline.id).where(Baseline.model_id == model_id, Baseline.is_active.is_(True))
+    ).first()
+    if active is not None and not body.replace_active:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"model {model_id!r} already has an active baseline (id {active}); registering "
+                "another deactivates it and changes what every future drift number is measured "
+                "against. Send replace_active=true to confirm."
+            ),
+        )
+
     db.execute(
         update(Baseline).where(Baseline.model_id == model_id, Baseline.is_active.is_(True)).values(
             is_active=False
@@ -66,6 +85,7 @@ def register_baseline(
         features=[record.features for record in body.records],
         prediction_scores=[record.prediction_score for record in body.records],
         schema=config.schema_,
+        segment_dimensions=config.segments.dimensions,
     )
     baseline = Baseline(model_id=model_id, is_active=True, binning_config=binning_config)
     db.add(baseline)

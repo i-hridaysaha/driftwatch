@@ -24,7 +24,16 @@ MODEL_ID = "example-model"
 REGIONS = ["EU", "US", "APAC"]
 
 
-def _register_baseline(db_session: Session, n: int = 60) -> Baseline:
+# The aggressive profile's clear thresholds (PSI 0.07, KS D 0.1, Cramer's V
+# 0.07, JSD 0.03) are only meaningful once every statistic's sampling-noise
+# ceiling sits under them, which for two equal samples takes about 1,500
+# rows. Tests that want a statistic REFUSED for being under its floor use
+# SMALL instead.
+N = 1500
+SMALL = 60
+
+
+def _register_baseline(db_session: Session, n: int = N) -> Baseline:
     db_session.add(Model(model_id=MODEL_ID))
     db_session.flush()
 
@@ -83,7 +92,7 @@ def test_idempotent_rerun_returns_none_and_no_duplicate_rows(db_session: Session
     _register_baseline(db_session)
     window_start = datetime(2026, 1, 1, tzinfo=UTC)
     window_end = window_start + timedelta(hours=1)
-    _add_predictions(db_session, window_start, 60)
+    _add_predictions(db_session, window_start, N)
 
     first = evaluate_window(db_session, MODEL_ID, window_start, window_end)
     assert first is not None
@@ -133,7 +142,7 @@ def test_force_reevaluates_and_replaces_prior_results(db_session: Session) -> No
     _register_baseline(db_session)
     window_start = datetime(2026, 1, 1, tzinfo=UTC)
     window_end = window_start + timedelta(hours=1)
-    _add_predictions(db_session, window_start, 60)
+    _add_predictions(db_session, window_start, N)
 
     first = evaluate_window(db_session, MODEL_ID, window_start, window_end)
     assert first is not None
@@ -170,12 +179,12 @@ def test_window_below_min_size_marks_all_tests_not_computable(db_session: Sessio
 def test_segment_below_min_size_is_not_computable_but_global_still_computes(
     db_session: Session,
 ) -> None:
-    _register_baseline(db_session, n=90)
+    _register_baseline(db_session, n=N)
     window_start = datetime(2026, 1, 1, tzinfo=UTC)
     window_end = window_start + timedelta(hours=1)
-    # 60 predictions total but ALL in one region -> that region's segment has 60 rows
+    # every prediction in one region -> that region's segment has N rows
     # (fine), but the other two configured regions have 0 -- never even attempted.
-    _add_predictions(db_session, window_start, 60, region_override="EU")
+    _add_predictions(db_session, window_start, N, region_override="EU")
 
     window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
     assert window is not None
@@ -187,7 +196,7 @@ def test_segment_below_min_size_is_not_computable_but_global_still_computes(
     ).all()
     assert any(r.status == MetricStatus.COMPUTED for r in global_results)
 
-    # EU has 60 rows (>= min_segment_size 30) and should be computed
+    # EU has N rows (>= min_segment_size 30) and should be computed
     eu_results = db_session.scalars(
         select(DriftResult).where(
             DriftResult.evaluation_window_id == window.id,
@@ -203,7 +212,7 @@ def test_stores_baseline_version_and_config_hash(db_session: Session) -> None:
     baseline = _register_baseline(db_session)
     window_start = datetime(2026, 1, 1, tzinfo=UTC)
     window_end = window_start + timedelta(hours=1)
-    _add_predictions(db_session, window_start, 60)
+    _add_predictions(db_session, window_start, N)
 
     window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
 
@@ -220,7 +229,7 @@ def test_effect_size_drives_significance_not_p_value(db_session: Session) -> Non
     window_end = window_start + timedelta(hours=1)
     # live ages shifted 500 above baseline's entire range -> guaranteed overflow bucket,
     # maximal PSI and KS D-statistic (completely disjoint samples)
-    _add_predictions(db_session, window_start, 60, age_offset=500)
+    _add_predictions(db_session, window_start, N, age_offset=500)
 
     window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
     assert window is not None
@@ -249,7 +258,7 @@ def test_benjamini_hochberg_sets_corrected_p_value_only_where_applicable(
     _register_baseline(db_session)
     window_start = datetime(2026, 1, 1, tzinfo=UTC)
     window_end = window_start + timedelta(hours=1)
-    _add_predictions(db_session, window_start, 60)
+    _add_predictions(db_session, window_start, N)
 
     window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
     assert window is not None
@@ -272,36 +281,21 @@ def test_benjamini_hochberg_sets_corrected_p_value_only_where_applicable(
 def test_evaluate_window_opens_a_real_alert_end_to_end(db_session: Session) -> None:
     """Not a direct call into the alert engine -- proves the actual wiring
     through evaluate_window creates a real Alert row via the real
-    aggressive.yaml profile (fire_persistence_windows: 1). The alert is the
-    KS one: at 60 baseline rows against 60 live rows PSI's sampling-noise
-    ceiling is far above aggressive's 0.07 clear threshold, so the PSI row
-    is (correctly) not_computable and cannot open anything."""
+    aggressive.yaml profile (fire_persistence_windows: 1)."""
     _register_baseline(db_session)
     window_start = datetime(2026, 1, 1, tzinfo=UTC)
     window_end = window_start + timedelta(hours=1)
-    _add_predictions(db_session, window_start, 60, age_offset=500)  # guaranteed drift
+    _add_predictions(db_session, window_start, N, age_offset=500)  # guaranteed drift
 
     window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
     assert window is not None
-
-    psi_row = db_session.scalars(
-        select(DriftResult).where(
-            DriftResult.evaluation_window_id == window.id,
-            DriftResult.feature_name == "age",
-            DriftResult.test_method == TestMethod.PSI,
-            DriftResult.segment_dimension.is_(None),
-        )
-    ).one()
-    assert psi_row.status == MetricStatus.NOT_COMPUTABLE
-    assert psi_row.not_computable_reason is not None
-    assert "sampling-noise ceiling" in psi_row.not_computable_reason
 
     alert = db_session.scalars(
         select(Alert).where(
             Alert.model_id == MODEL_ID,
             Alert.kind == AlertKind.DRIFT,
             Alert.feature_name == "age",
-            Alert.signal_name == "ks",
+            Alert.signal_name == "psi",
         )
     ).one()
 
@@ -319,10 +313,10 @@ def test_segment_defining_feature_is_not_evaluated_inside_its_own_segment(
     permanently not_computable row per segment, which opened a permanent
     not_computable alert per segment value on every scenario. Now no row is
     written at all: the dashboard renders the slot as not_configured."""
-    _register_baseline(db_session, n=90)
+    _register_baseline(db_session, n=N)
     window_start = datetime(2026, 1, 1, tzinfo=UTC)
     window_end = window_start + timedelta(hours=1)
-    _add_predictions(db_session, window_start, 90)
+    _add_predictions(db_session, window_start, N)
 
     window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
     assert window is not None
@@ -356,32 +350,39 @@ def test_segment_defining_feature_is_not_evaluated_inside_its_own_segment(
     assert {r.segment_value for r in age_in_segments} == set(REGIONS)
 
 
-def test_psi_is_refused_below_its_sampling_noise_floor_and_ks_is_not(db_session: Session) -> None:
-    """At 60 baseline rows against 60 live rows, PSI's null ceiling with 12
-    buckets is about 0.68 -- an order of magnitude above the aggressive
-    profile's 0.07 clear threshold -- so gating on it would flap. The row
-    is written as not_computable with the reason; KS on the same samples
-    is computed as normal."""
-    _register_baseline(db_session)
+def test_every_statistic_is_refused_below_its_sampling_noise_floor(db_session: Session) -> None:
+    """At 60 baseline rows against 60 live rows every effect size's null
+    ceiling is above the aggressive profile's clear threshold -- PSI (0.07),
+    KS D (0.1), Cramer's V (0.07) and the score JSD (0.03) -- so each row is
+    written as not_computable with its floor and its source in the reason,
+    and no alert can open on any of them. The same window at N rows (the
+    other tests in this module) computes all four."""
+    _register_baseline(db_session, n=SMALL)
     window_start = datetime(2026, 1, 1, tzinfo=UTC)
     window_end = window_start + timedelta(hours=1)
-    _add_predictions(db_session, window_start, 60)
+    _add_predictions(db_session, window_start, SMALL, age_offset=500)  # would be drift
 
     window = evaluate_window(db_session, MODEL_ID, window_start, window_end)
     assert window is not None
 
-    rows = {
-        r.test_method: r
-        for r in db_session.scalars(
-            select(DriftResult).where(
-                DriftResult.evaluation_window_id == window.id,
-                DriftResult.feature_name == "age",
-                DriftResult.segment_dimension.is_(None),
-            )
-        ).all()
+    rows = db_session.scalars(
+        select(DriftResult).where(
+            DriftResult.evaluation_window_id == window.id,
+            DriftResult.segment_dimension.is_(None),
+        )
+    ).all()
+    by_method = {(r.feature_name, r.test_method): r for r in rows}
+    expectations = {
+        ("age", TestMethod.PSI): ("PSI", "simulated on the baseline"),
+        ("age", TestMethod.KS): ("KS D", "Kolmogorov"),
+        ("region", TestMethod.CHI_SQUARE): ("Cramer's V", "chi-square with"),
+        ("__prediction_score__", TestMethod.JSD): ("JSD", "simulated on the baseline"),
     }
-    assert rows[TestMethod.PSI].status == MetricStatus.NOT_COMPUTABLE
-    assert rows[TestMethod.PSI].statistic is None
-    assert rows[TestMethod.PSI].not_computable_reason is not None
-    assert "clear threshold 0.07" in rows[TestMethod.PSI].not_computable_reason
-    assert rows[TestMethod.KS].status == MetricStatus.COMPUTED
+    for key, (name, source) in expectations.items():
+        row = by_method[key]
+        assert row.status == MetricStatus.NOT_COMPUTABLE, key
+        assert row.statistic is None
+        assert row.not_computable_reason is not None
+        assert row.not_computable_reason.startswith(f"{name} sampling-noise ceiling"), key
+        assert source in row.not_computable_reason, key
+    assert db_session.scalars(select(Alert).where(Alert.model_id == MODEL_ID)).all() == []

@@ -446,8 +446,9 @@ def fetch_performance_timeline(
 
     Ties on computed_at are broken by id: Postgres's now() is transaction-
     start time, so two revisions of the same window recomputed in the same
-    transaction (the ordinary case for one label-ingestion request that
-    touches several windows) can share an identical computed_at -- the same
+    transaction (the ordinary case for one scheduler tick recomputing the
+    several windows a label batch flagged) can share an identical
+    computed_at -- the same
     reasoning driftwatch.evaluation.performance.recompute_performance_for_window
     already applies to labels sharing received_at. Without the id
     tiebreaker, ROW_NUMBER()'s ordering among tied rows is unspecified."""

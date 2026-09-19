@@ -52,7 +52,7 @@ features:
   - name: device_id
     dtype: categorical
     nullable: false
-    cardinality: 15
+    cardinality: 6
 
 segments: [region]
 min_segment_size: 30

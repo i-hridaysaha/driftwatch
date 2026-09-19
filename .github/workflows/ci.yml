@@ -46,21 +46,73 @@ jobs:
       - name: Test (pytest)
         run: uv run pytest
 
-      - name: Demo scenarios: generate and verify
-        # pytest's migrated_db fixture downgrades back to "base" once its
-        # last module finishes, so the schema can't be assumed to still be
-        # there -- re-run migrations explicitly rather than relying on
-        # pytest's leftover state. Each scenario truncates every app table
-        # on load (see driftwatch.demo.build.reset_database), so these must
-        # run one at a time, generate-then-verify, never in parallel.
+  scenarios:
+    # Every shipped scenario, generated and verified end to end against a
+    # real Postgres, at its shipped seed and at two others: a scenario's
+    # claim has to hold for the mechanism, not for one lucky draw. One
+    # matrix job per seed, because each scenario truncates every app table
+    # on load (see driftwatch.demo.build.reset_database), so within a job
+    # they run one at a time, generate-then-verify, never in parallel.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [shipped, 7, 11]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: driftwatch
+          POSTGRES_PASSWORD: driftwatch
+          POSTGRES_DB: driftwatch
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U driftwatch"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://driftwatch:driftwatch@localhost:5432/driftwatch
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.29"
+      - name: Set up Python
+        run: uv python install
+      - name: Install dependencies
+        run: uv sync --all-groups
+      - name: Generate and verify every scenario (seed ${{ matrix.seed }})
         run: |
           uv run alembic upgrade head
-          for scenario in clean covariate_shift segment_isolated concept_drift; do
+          seed_flag=""
+          if [ "${{ matrix.seed }}" != "shipped" ]; then seed_flag="--seed ${{ matrix.seed }}"; fi
+          for scenario in clean covariate_shift segment_isolated concept_drift burst_shift; do
             echo "::group::$scenario"
-            uv run python -m driftwatch.cli demo "$scenario"
+            uv run python -m driftwatch.cli demo "$scenario" $seed_flag
             uv run python -m driftwatch.cli demo-verify "$scenario"
             echo "::endgroup::"
           done
+
+  false-open-rate:
+    # The alerting discipline as a tested property: forty clean seeds at the
+    # segment scenario's geometry, through the same statistics and streak
+    # rule the engine uses, must open nothing. Pure generator, no database.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.11.29"
+      - name: Set up Python
+        run: uv python install
+      - name: Install dependencies
+        run: uv sync --all-groups
+      - name: Forty clean seeds open zero alerts
+        run: uv run python figures/_src/sweeps.py clean --assert
 
   docker-compose-smoke-test:
     # Verifies the stated deliverable "docker compose up brings the whole

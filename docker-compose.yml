@@ -21,6 +21,9 @@ services:
       dockerfile: docker/api.Dockerfile
     environment:
       DATABASE_URL: postgresql+psycopg://driftwatch:driftwatch@postgres:5432/driftwatch
+      # export API_KEY before `docker compose up` to require X-API-Key on
+      # every write; left unset, the API is open and says so at startup
+      API_KEY: ${API_KEY:-}
     ports:
       - "8000:8000"
     depends_on:

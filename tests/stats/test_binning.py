@@ -1,5 +1,7 @@
 import math
 
+import numpy as np
+
 from driftwatch.config.schema import (
     FeatureSpec,
     LabelFieldSpec,
@@ -11,7 +13,9 @@ from driftwatch.stats.binning import (
     compute_baseline_binning,
     compute_categorical_categories,
     compute_continuous_edges,
+    psi_null_floor_table,
 )
+from driftwatch.stats.psi import NULL_FLOOR_GRID
 
 
 def test_continuous_edges_span_exactly_min_to_max() -> None:
@@ -88,7 +92,12 @@ def test_compute_baseline_binning_all_null_feature_is_defined_not_raising() -> N
         schema=schema,
     )
 
-    assert binning["features"]["age"] == {"type": "continuous", "edges": [], "effective_bins": 0}
+    assert binning["features"]["age"] == {
+        "type": "continuous",
+        "edges": [],
+        "effective_bins": 0,
+        "null_floor": {"sizes": [], "mean": [], "ceiling": []},
+    }
 
 
 def test_effective_bins_reflects_post_dedup_count_not_nominal_n_bins() -> None:
@@ -109,3 +118,45 @@ def test_effective_bins_reflects_post_dedup_count_not_nominal_n_bins() -> None:
     entry = binning["features"]["skewed"]
     assert entry["effective_bins"] == len(entry["edges"]) - 1
     assert entry["effective_bins"] < 10  # fewer than the nominal bin count requested
+
+
+def test_null_floor_tables_are_simulated_globally_and_per_segment_slice() -> None:
+    """Every continuous feature carries a simulated PSI null table on the
+    global baseline and on each segment slice, sliced by the declared
+    segment dimension (a categorical feature, never itself tabled), and
+    the ceiling falls as the live size grows."""
+    schema = ModelSchemaSpec(
+        features=[
+            FeatureSpec(name="age", dtype="continuous", nullable=False),
+            FeatureSpec(name="region", dtype="categorical", nullable=False),
+        ],
+        prediction=PredictionFieldSpec(dtype="continuous"),
+        label=LabelFieldSpec(dtype="categorical"),
+    )
+    rng = np.random.default_rng(0)
+    records = [
+        {"age": float(rng.normal(40, 12)), "region": ["EU", "US", "APAC"][i % 3]}
+        for i in range(600)
+    ]
+    binning = compute_baseline_binning(
+        features=records,
+        prediction_scores=[0.5] * 600,
+        schema=schema,
+        segment_dimensions=["region"],
+    )
+
+    table = binning["features"]["age"]["null_floor"]
+    assert table["sizes"] == [float(n) for n in NULL_FLOOR_GRID]
+    assert all(a >= b for a, b in zip(table["ceiling"], table["ceiling"][1:], strict=False))
+    assert set(binning["segments"]["region"]) == {"APAC", "EU", "US"}
+    apac = binning["segments"]["region"]["APAC"]["features"]
+    assert set(apac) == {"age"}  # region is not tabled inside its own segment
+    assert psi_null_floor_table(binning, "age", "region", "APAC") is apac["age"]["null_floor"]
+    assert psi_null_floor_table(binning, "age", None, None) is table
+    assert psi_null_floor_table(binning, "region", None, None) is None
+    # a 200-row slice is noisier than the 600-row whole at the same live size
+    from driftwatch.stats.psi import psi_null_ceiling_from_table
+
+    assert psi_null_ceiling_from_table(apac["age"]["null_floor"], 75) > (
+        psi_null_ceiling_from_table(table, 75) or 0.0
+    )

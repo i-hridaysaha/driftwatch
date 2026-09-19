@@ -26,7 +26,11 @@ detected exactly that fault — and nothing else.
 | `clean` | none | no alerts | ✅ no alerts, zero significant readings |
 | `covariate_shift` | global input-distribution shift | drift alert fires; a one-window blip does not | ✅ |
 | `segment_isolated` | shift confined to one segment (APAC, 15% of traffic) | both segment alerts open, escalate and resolve; global stays quiet | ✅ global max 0.042, segment max 1.23 |
-| `concept_drift` | label noise; inputs stable, only visible after labels backfill | PR-AUC degrades and escalates | ✅ 0.874 before, 0.386 after |
+| `concept_drift` | label noise; inputs stable, only visible after labels backfill | PR-AUC degrades and escalates | ✅ 0.874 before, 0.387 after |
+| `burst_shift` (aggressive profile) | a four-window burst, then a one-window blip | the burst opens on its first window, escalates, resolves; the blip opens and resolves too | ✅ |
+
+Every scenario is generated and verified in CI at its shipped seed and at
+two others (`--seed 7`, `--seed 11`), one matrix job each.
 
 > **Data note:** every number here comes from *synthetic, staged* scenarios
 > against a real Postgres — not a benchmark. Parameters were tuned to produce
@@ -46,8 +50,15 @@ $ driftwatch demo-verify segment_isolated
 $ driftwatch demo-verify concept_drift
 [PASS] no feature or prediction-score drift (inputs stay stable): none
 [PASS] global PR-AUC degrades and escalates after label_noise: status=escalated
-[PASS] PR-AUC healthy before, degraded after (final backfilled values): early_mean=0.874, late_mean=0.386, clear=0.65, fire=0.5
-[PASS] degradation only visible after backfill: 57 windows initially not_computable for lack of labels
+[PASS] PR-AUC healthy before, degraded after (final backfilled values): early_mean=0.874, late_mean=0.387, clear=0.65, fire=0.5
+[PASS] degradation only visible after backfill: 60 windows initially not_computable for lack of labels
+
+$ driftwatch demo-verify burst_shift
+[PASS] no unexpected alerts: none
+[PASS] global age psi: the burst opens on its FIRST breaching window, escalates, and resolves: opened at window 20: True, status=resolved, opened at 0.327, escalated at 0.375
+[PASS] global age psi: the one-window blip opens (aggressive does not suppress it) and resolves without escalating: status=resolved, never escalated
+[PASS] global age ks: the burst opens on its FIRST breaching window, escalates, and resolves: opened at window 20: True, status=resolved, opened at 0.239, escalated at 0.244
+[PASS] global age ks: the one-window blip opens (aggressive does not suppress it) and resolves without escalating: status=resolved, never escalated
 ```
 
 Regenerating any scenario reproduces every number above to the last digit;
@@ -59,15 +70,18 @@ global reading stays quiet while the segment fires.
 
 Before v1.0.0 the segment scenario ran at 500 predictions a window, which
 gave the 15% segment about 75 rows against a 225-row baseline slice. At
-that volume PSI's own sampling noise (null mean about 0.20; see
-`driftwatch.stats.psi.psi_null_floor`) sat in the dead zone between the
-patient profile's 0.15 clear and 0.25 fire thresholds: the segment breached
-on noise one quiet window in four, and after the shift ended its PSI alert
-could never assemble five clear windows, so it stayed escalated while the KS
-alert resolved. The verifier of the time passed on the union of the two.
-The verifier now checks each alert's whole journey, the evaluation pipeline
-refuses to gate on PSI where its noise ceiling exceeds the clear threshold,
-and the scenario ships at 2000 a window.
+that volume PSI's own sampling noise (null mean about 0.20) sat in the dead
+zone between the patient profile's 0.15 clear and 0.25 fire thresholds: the
+segment breached on noise one quiet window in four, and after the shift
+ended its PSI alert could never assemble five clear windows, so it stayed
+escalated while the KS alert resolved. The verifier of the time passed on
+the union of the two. Since v1.0.0 the verifier checks each alert's whole
+journey and the pipeline refuses to gate on a statistic where its noise
+ceiling exceeds the clear threshold; since v1.1.0 that floor is simulated
+on the registered baseline itself for PSI and JSD, closed-form for KS D and
+Cramér's V, and every scenario is sized so that none of them trips it (the
+first run of the aggressive scenario did, on a fifteen-category feature's
+Cramér's V, which is how that floor got added).
 
 ## Why this is non-trivial
 
@@ -85,12 +99,28 @@ and the scenario ships at 2000 a window.
   Benjamini-Hochberg correction of them is informational: it never decides
   what fires.
 - **Effect sizes are stable as volume grows, not as it shrinks.** Under no
-  shift at all PSI reads sampling noise of roughly (bins − 1)(1/n_baseline +
-  1/n_live), which at a few dozen rows sits above every fire threshold
-  shipped here. The pipeline computes that floor per window and refuses to
-  gate on PSI where the floor's ceiling exceeds the profile's clear
-  threshold, recording the row as `not_computable` with the reason rather
-  than as a number that would flap.
+  shift at all every one of them reads sampling noise, and the noise grows
+  as the sample shrinks: PSI's is roughly (bins − 1)(1/n_baseline + 1/n_live),
+  which at a few dozen rows sits above every fire threshold shipped here.
+  The pipeline computes each statistic's null ceiling per window and refuses
+  to gate where it exceeds the profile's clear threshold, recording the row
+  as `not_computable` with the floor in the reason rather than as a number
+  that would flap. PSI's and JSD's ceilings are simulated on the registered
+  baseline at registration (`driftwatch.stats.psi.simulate_psi_null`, stored
+  per feature and per segment slice); KS D's and Cramér's V's are closed
+  form (`driftwatch.stats.floors`).
+- **The request flags, the scheduler works.** `POST /labels` inserts the
+  labels and sets `performance_stale` on the windows they touch, in one
+  transaction. The scheduler's next tick claims each flagged window with a
+  single `UPDATE`, recomputes it, re-evaluates its alerts and notifies. A
+  month of labels costs the request one update per window, not 720
+  recomputes and webhook calls, and performance lags a batch by at most one
+  tick.
+- **A notification that failed is retried, a bounded number of times.** A
+  round in which a channel raised leaves the alert's delivered status behind
+  its real status; each tick retries it until it succeeds or five attempts
+  are spent, after which the error stays on the row. An alert that opens
+  during a webhook outage still reaches someone once the webhook is back.
 - **Segment-level drift, not just global.** Aggregate stats hide a failure
   confined to one geography or category. `segment_isolated` proves a
   15%-weighted segment can breach while the global metric stays quiet. A
@@ -114,17 +144,18 @@ and the scenario ships at 2000 a window.
 ![Predictions, labels and baseline registrations enter through one FastAPI endpoint into an append-only Postgres store. A scheduler drives the drift path, label ingestion drives the performance path, both feed an alert state machine, results and alert rows are written back to the store, notifications leave on status transitions, and a read-only dashboard reads the store directly.](figures/03_architecture.png)
 
 ```
-model → POST predictions / labels / baseline (FastAPI, schema-validated) → Postgres (append-only)
+model → POST predictions / labels / baseline (FastAPI, schema-validated, X-API-Key) → Postgres (append-only)
                                                       │
-     scheduler windows by event time ────────────────┤──── label ingestion, per touched window
+     scheduler tick: windows past the watermark ─────┤──── labels flag the windows they touch
                                                       ▼                          ▼
-   drift path: PSI · KS · chi-square · JSD, sealed once    performance path: pr_auc / precision / recall
+   drift path: PSI · KS · chi-square · JSD, sealed once    performance path: recomputed by the next tick
+   (each refused below its sampling-noise floor)           (pr_auc / precision / recall)
                                                       │                          │
                         stateful alerting (open → escalated → resolved, hysteresis, dead zone)
                                                       │
                   drift results, performance results and alert rows written back to Postgres
                         │                                              │
-        notifications (log, webhook; on transition, no retry)     read-only dashboard (reads Postgres)
+   notifications (log, webhook; on transition, retried per tick)   read-only dashboard (reads Postgres)
 ```
 
 Per-model behaviour — feature schema, drift thresholds, segments, alert
@@ -153,9 +184,11 @@ than being clipped.
   (precision/recall-style metrics matter more than accuracy under imbalance);
   `rmse`/`mae` available for regression. Which metrics run for a model is
   declared in its profile YAML, not branched in code.
-- **Two profiles ship** — `aggressive.yaml` (1-hour windows, fires on one
-  breaching window; for fast, adversarial inputs) and `patient.yaml` (needs 3
-  consecutive breaches, wide hysteresis gap; for slow population drift).
+- **Two profiles ship, and both are exercised** — `aggressive.yaml` (1-hour
+  windows, fires on one breaching window; for fast, adversarial inputs) by
+  the `burst_shift` scenario, and `patient.yaml` (needs 3 consecutive
+  breaches, wide hysteresis gap; for slow population drift) by the other
+  four.
 - **Reproducibility** — the generator seed lives in each scenario's YAML; the
   same `(range, window duration)` always yields the same UTC-aligned window
   boundaries, computed by a scheduler tick or a CLI backfill years apart.
@@ -183,8 +216,14 @@ docker compose up --build
 Full test suite (needs a Postgres reachable at `DATABASE_URL`):
 
 ```bash
-uv run pytest      # 209 passed
+uv run pytest      # 219 passed
 ```
+
+Set `API_KEY` before starting the API to require `X-API-Key` on every write
+endpoint (`/health` stays open); left unset, the API is open and logs a
+warning at startup. Registering a baseline for a model that already has one
+is refused with 409 unless the request says `replace_active: true`, because
+that write changes what every future drift number is measured against.
 
 Redraw the case study's figures from the generator and the repository's
 own statistics (no database needed; `matplotlib` is pulled in for the run):
@@ -198,7 +237,7 @@ uv run --with matplotlib python figures/_src/figures.py
 ```
 src/driftwatch/
   api/          FastAPI ingestion — baselines, predictions, labels
-  stats/        PSI, KS, chi-square, JSD, Benjamini-Hochberg (pure functions)
+  stats/        PSI, KS, chi-square, JSD, Benjamini-Hochberg, and each one's null floor (pure functions)
   evaluation/   per-window drift + performance computation
   scheduler/    APScheduler, event-time windowing, evaluate_window()
   alerting/     stateful alerts, hysteresis, pluggable notifications
@@ -208,7 +247,7 @@ src/driftwatch/
   db/, config/  SQLAlchemy models · YAML profile/model loader
 configs/        profiles/ · models/ · scenarios/
 alembic/        migrations
-tests/          31 test files, 209 tests
+tests/          31 test files, 219 tests
 figures/        the case study's figures and the script that draws them from the generator
 ```
 
@@ -224,22 +263,21 @@ figures/        the case study's figures and the script that draws them from the
   liveness check has no DB dependency, so it doesn't exercise migrations.
 - **Notifications ship as logging + generic webhook only** — Slack/email are
   thin adapters a real deployment builds on a webhook receiver, deliberately
-  not special-cased here. Delivery is fire-and-forget on a status transition:
-  a failed webhook is recorded on the alert row (`last_notification_error`)
-  and not retried.
-- **Label ingestion recomputes synchronously.** `POST /labels` recomputes
-  performance, re-runs the alert engine and calls the notification channels
-  for every window the batch touches, inside the request. A backfill of a
-  month of hourly windows does all of that in one request; a queue is the
-  obvious next step and is not built.
-- **No authentication.** The ingestion and baseline endpoints are open, and
-  registering a baseline deactivates the current one, so anything that can
-  reach the API can change what drift is measured against.
+  not special-cased here. Retry is bounded to five rounds a tick apart; an
+  outage longer than that leaves the error on the alert row and nothing else.
+- **Performance lags a label batch by up to one scheduler tick** (five
+  minutes by default), the price of keeping recomputation out of the
+  request path. A retried notification round re-runs every channel, so a
+  log line can repeat while the webhook catches up.
+- **Authentication is one shared key.** `API_KEY` protects every write, and
+  it is a single secret for every caller; per-model credentials and rotation
+  are deployment work.
 - **No model version column.** `config_hash` on every window makes a profile
   change detectable after the fact; a retrained model behind the same
   `model_id` is not.
-- **The aggressive profile is not exercised by a shipped scenario.** All four
-  scenarios run under `patient`; `aggressive` is covered by unit tests only.
+- **The sampling-noise floors refuse rather than correct.** A signal a
+  profile asks for at a volume that cannot carry it is a silence alert, not
+  a corrected statistic; the operator widens the window or drops the test.
 
 Deeper methodology (statistical-choice rationale, alerting lifecycle, dashboard
 state model) lives in the [case study](https://www.hridaysaha.com/projects-1/drift-watch%3A-ml-model-monitoring-service).

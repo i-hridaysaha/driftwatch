@@ -393,11 +393,84 @@ def _verify_concept_drift(
     return checks
 
 
+def _verify_burst_shift(
+    session: Session, scenario: ScenarioConfig, profile: Profile
+) -> list[Check]:
+    """The aggressive profile's end-to-end check: the burst opens on its first
+    breaching window (fire persistence 1), escalates on its third, and
+    resolves; the single-window blip, which patient suppresses, opens and
+    resolves too. Both events are global shifts on one feature, so every
+    region's segment sees them as well."""
+    expected: set[AlertIdentity] = {
+        ("drift", method, "age", dimension, value)
+        for method in ("psi", "ks")
+        for dimension, value in _REGIONS
+    }
+    alerts = _alerts_for(session, scenario.model_id)
+    unexpected = _unexpected_alerts(alerts, expected)
+    checks = [
+        Check(
+            "no unexpected alerts",
+            not unexpected,
+            "none" if not unexpected else f"{len(unexpected)} unexpected: {_describe(unexpected)}",
+        )
+    ]
+
+    burst, blip = scenario.events
+    window_ids_by_index = {
+        int((w.window_start - scenario.start_date).total_seconds() // 3600): w.id
+        for w in session.query(EvaluationWindow).filter(
+            EvaluationWindow.model_id == scenario.model_id
+        )
+    }
+    for test_method in (TestMethod.PSI, TestMethod.KS):
+        rows = sorted(
+            (
+                a
+                for a in alerts
+                if a.signal_name == test_method.value
+                and a.feature_name == "age"
+                and a.segment_dimension is None
+            ),
+            key=lambda a: a.id,
+        )
+        first = rows[0] if len(rows) == 2 else None
+        second = rows[1] if len(rows) == 2 else None
+        checks.append(
+            Check(
+                f"global age {test_method.value}: the burst opens on its FIRST breaching window, "
+                "escalates, and resolves",
+                first is not None
+                and first.evidence_window_id == window_ids_by_index.get(burst.start_window)
+                and first.escalated_at is not None
+                and first.status == AlertStatus.RESOLVED,
+                f"{len(rows)} alert rows"
+                if first is None
+                else f"opened at window {burst.start_window}: "
+                f"{first.evidence_window_id == window_ids_by_index.get(burst.start_window)}, "
+                f"{_describe_journey([first])}",
+            )
+        )
+        checks.append(
+            Check(
+                f"global age {test_method.value}: the one-window blip opens (aggressive does not "
+                "suppress it) and resolves without escalating",
+                second is not None
+                and second.evidence_window_id == window_ids_by_index.get(blip.start_window)
+                and second.escalated_at is None
+                and second.status == AlertStatus.RESOLVED,
+                f"{len(rows)} alert rows" if second is None else _describe_journey([second]),
+            )
+        )
+    return checks
+
+
 _VERIFIERS: dict[str, Callable[[Session, ScenarioConfig, Profile], list[Check]]] = {
     "clean": _verify_clean,
     "covariate_shift": _verify_covariate_shift,
     "segment_isolated": _verify_segment_isolated,
     "concept_drift": _verify_concept_drift,
+    "burst_shift": _verify_burst_shift,
 }
 
 

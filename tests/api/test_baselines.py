@@ -1,8 +1,10 @@
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from driftwatch.db.models import Baseline
+from driftwatch.settings import Settings
 
 VALID_RECORD = {"features": {"age": 30, "region": "EU", "income": 50000}, "prediction_score": 0.4}
 
@@ -80,7 +82,12 @@ def test_re_registering_baseline_deactivates_prior_one(
     client: TestClient, db_session: Session
 ) -> None:
     first = client.post("/models/example-model/baseline", json={"records": [VALID_RECORD]})
-    second = client.post("/models/example-model/baseline", json={"records": [VALID_RECORD]})
+    refused = client.post("/models/example-model/baseline", json={"records": [VALID_RECORD]})
+    assert refused.status_code == 409  # replacing the active baseline needs saying so
+    second = client.post(
+        "/models/example-model/baseline",
+        json={"records": [VALID_RECORD], "replace_active": True},
+    )
 
     first_id = first.json()["baseline_id"]
     second_id = second.json()["baseline_id"]
@@ -93,3 +100,28 @@ def test_re_registering_baseline_deactivates_prior_one(
 
     assert active_ids == [second_id]
     assert db_session.get(Baseline, first_id).is_active is False  # type: ignore[union-attr]
+
+
+def test_write_endpoints_require_the_api_key_when_one_is_configured(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With DRIFTWATCH api_key set, every write needs X-API-Key and the
+    liveness probe does not; without it (every other test here) the
+    endpoints are open."""
+    monkeypatch.setattr("driftwatch.api.deps.get_settings", lambda: Settings(api_key="s3cret"))
+
+    assert client.get("/health").status_code == 200
+    bare = client.post("/models/example-model/baseline", json={"records": [VALID_RECORD]})
+    assert bare.status_code == 401
+    wrong = client.post(
+        "/models/example-model/baseline",
+        json={"records": [VALID_RECORD]},
+        headers={"X-API-Key": "nope"},
+    )
+    assert wrong.status_code == 401
+    right = client.post(
+        "/models/example-model/baseline",
+        json={"records": [VALID_RECORD]},
+        headers={"X-API-Key": "s3cret"},
+    )
+    assert right.status_code == 201

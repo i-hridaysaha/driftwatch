@@ -1,11 +1,11 @@
 # No feature-shift events at all -- inputs never move. The only event is
 # label_noise, which degrades the true relationship between prediction
 # score and label starting at window 40. early_cutoff_hours is
-# deliberately short (2h, versus a 6h median delay) so most labels for a
-# window aren't in yet by the time evaluate_range runs -- the window's
-# INITIAL performance is computed from too few labels to be reliable
-# (often not_computable outright), and the degradation only becomes
-# visible in the LATEST revision once backfill completes.
+# deliberately short (1h, versus a 6h median delay) so almost no labels for
+# a window are in yet by the time evaluate_range runs -- the window's
+# INITIAL performance is not_computable for lack of labels, and the
+# degradation only becomes visible in the LATEST revision once backfill
+# completes.
 name: concept_drift
 description: >
   Feature and prediction-score distributions stay stable throughout.
@@ -18,8 +18,8 @@ start_date: "2026-01-01T00:00:00Z"
 window: "1h"
 stable_windows: 40
 total_windows: 60
-predictions_per_window: 700
-baseline_size: 2000
+predictions_per_window: 1200
+baseline_size: 3600
 prediction_type: binary_classification
 prediction_distribution: {type: beta, a: 0.4, b: 0.4}
 
@@ -41,7 +41,7 @@ features:
   - name: device_id
     dtype: categorical
     nullable: false
-    cardinality: 15
+    cardinality: 6
 
 segments: [region]
 min_segment_size: 30
@@ -51,7 +51,15 @@ label_delay:
   median_hours: 6
   sigma: 0.7
   max_hours: 72
-  early_cutoff_hours: 2
+  # Only labels that land within the first hour are present when a window
+  # is first evaluated: about half a percent of them at this delay
+  # distribution, or roughly six per 1200-row window, far under the
+  # profile's 50-label minimum. Every window therefore starts
+  # not_computable and its degradation is visible only after backfill,
+  # which is the whole point of this scenario. (At 2 hours and 700 rows a
+  # window the count sat just under the minimum by luck; at 1200 rows it
+  # cleared it and the scenario silently stopped demonstrating anything.)
+  early_cutoff_hours: 1
 
 events:
   - shift_type: label_noise

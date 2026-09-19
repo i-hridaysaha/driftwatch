@@ -83,7 +83,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     from driftwatch.demo.loader import ScenarioNotFoundError, list_scenario_names
 
     try:
-        summary = build_scenario(args.scenario, reset=not args.no_reset)
+        summary = build_scenario(args.scenario, reset=not args.no_reset, seed=args.seed)
     except ScenarioNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         print(f"available scenarios: {', '.join(list_scenario_names())}", file=sys.stderr)
@@ -129,6 +129,12 @@ def main(argv: list[str] | None = None) -> int:
         "--no-reset",
         action="store_true",
         help="load additively instead of truncating all data first",
+    )
+    demo_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="override the scenario's seed (CI verifies every scenario at several)",
     )
     demo_parser.set_defaults(func=_cmd_demo)
 

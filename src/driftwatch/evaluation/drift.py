@@ -19,11 +19,13 @@ from driftwatch.db.models import (
     TestMethod,
 )
 from driftwatch.evaluation.performance import recompute_performance_for_window
-from driftwatch.stats.chi_square import chi_square
+from driftwatch.stats.binning import prediction_score_null_floor_table, psi_null_floor_table
+from driftwatch.stats.chi_square import ChiSquareResult, chi_square
 from driftwatch.stats.correction import benjamini_hochberg
-from driftwatch.stats.jsd import jsd
-from driftwatch.stats.ks import ks
-from driftwatch.stats.psi import PSIResult, psi, psi_null_floor
+from driftwatch.stats.floors import cramers_v_null_ceiling, jsd_null_ceiling, ks_null_ceiling
+from driftwatch.stats.jsd import JSDResult, jsd
+from driftwatch.stats.ks import KSResult, ks
+from driftwatch.stats.psi import PSIResult, psi, psi_null_ceiling_from_table, psi_null_floor
 from driftwatch.stats.result import StatStatus
 
 PREDICTION_SCORE_FEATURE_NAME = "__prediction_score__"
@@ -52,13 +54,14 @@ def evaluate_window(
       driftwatch.scheduler.windowing.is_drift_watermark_elapsed for why.
     - PERFORMANCE is computed for whatever labels exist at this moment, but
       that is only the FIRST of potentially many computations for this
-      window: driftwatch.api.routes.labels calls
-      recompute_performance_for_window directly, independent of this
-      function, every time a new label arrives for a prediction in this
-      window -- indefinitely, with no watermark of its own. Calling this
-      function again for an already-evaluated window does NOT pick up new
-      labels; that happens automatically via label ingestion, not by
-      re-calling evaluate_window.
+      window: driftwatch.api.routes.labels flags the window as
+      performance_stale whenever a label arrives for a prediction in it,
+      and the scheduler's next tick recomputes it
+      (driftwatch.scheduler.jobs.recompute_stale_windows), independent of
+      this function -- indefinitely, with no watermark of its own. Calling
+      this function again for an already-evaluated window does NOT pick up
+      new labels; that happens through the flag, not by re-calling
+      evaluate_window.
 
     Idempotent for DRIFT, enforced by a database constraint rather than an
     application-level check-then-act: the window is "claimed" by inserting
@@ -268,6 +271,7 @@ def _evaluate_feature(
                     live_floats,
                     edges,
                     profile.drift_tests.continuous.psi_clear_threshold,
+                    psi_null_floor_table(binning, feature.name, segment_dimension, segment_value),
                 )
                 results.append(
                     _make_drift_result(
@@ -289,7 +293,11 @@ def _evaluate_feature(
                     )
                 )
             elif method == "ks":
-                ks_result = ks(baseline_floats, live_floats)
+                ks_result = _ks_or_below_floor(
+                    baseline_floats,
+                    live_floats,
+                    profile.drift_tests.continuous.ks_statistic_clear_threshold,
+                )
                 results.append(
                     _make_drift_result(
                         window,
@@ -315,7 +323,12 @@ def _evaluate_feature(
         baseline_strs = [str(v) for v in baseline_present]
         live_strs = [str(v) for v in live_present]
         for _method in profile.drift_tests.categorical.methods:
-            chi_result = chi_square(baseline_strs, live_strs, categories)
+            chi_result = _chi_square_or_below_floor(
+                baseline_strs,
+                live_strs,
+                categories,
+                profile.drift_tests.categorical.cramers_v_clear_threshold,
+            )
             results.append(
                 _make_drift_result(
                     window,
@@ -344,40 +357,151 @@ def _psi_or_below_floor(
     live_floats: list[float],
     edges: list[float],
     clear_threshold: float,
+    null_table: dict[str, list[float]] | None = None,
 ) -> PSIResult:
     """PSI, unless this pair of sample sizes is too small for the profile's
     clear threshold to mean anything -- in which case NOT_COMPUTABLE with
     the reason, never a number.
 
     Under no shift at all, PSI reads sampling noise that grows as the
-    samples shrink (driftwatch.stats.psi.psi_null_floor). If that noise
-    ceiling sits above the clear threshold, a perfectly quiet segment
-    cannot reliably classify as "clear": it lives in the dead zone or
-    breaches on noise, an alert on it can never assemble the run of clear
-    windows resolution needs, and a fire threshold near the ceiling opens
-    alerts on nothing. Gating on such a number would be exactly the
-    flapping the hysteresis exists to prevent, so it is refused here, with
-    a reason a reader can act on (more rows per window, wider windows, or
-    a wider clear threshold). min_window_size / min_segment_size are floors
-    on whether a statistic can be computed at all; this is the floor on
-    whether PSI is worth gating on, and it depends on the threshold."""
+    samples shrink. If that noise ceiling sits above the clear threshold, a
+    perfectly quiet segment cannot reliably classify as "clear": it lives
+    in the dead zone or breaches on noise, an alert on it can never
+    assemble the run of clear windows resolution needs, and a fire
+    threshold near the ceiling opens alerts on nothing. Gating on such a
+    number would be exactly the flapping the hysteresis exists to prevent,
+    so it is refused here, with a reason a reader can act on (more rows per
+    window, wider windows, or a wider clear threshold). min_window_size /
+    min_segment_size are floors on whether a statistic can be computed at
+    all; this is the floor on whether PSI is worth gating on, and it
+    depends on the threshold.
+
+    The ceiling comes from the baseline's own simulated null when the
+    baseline carries one (driftwatch.stats.psi.simulate_psi_null, stored at
+    registration for this feature and, for a segment, this slice), which
+    sees the real feature's shape, the epsilon floor on empty bins and the
+    baseline's own sampling term. A baseline registered before the tables
+    existed falls back to the chi-square approximation
+    (driftwatch.stats.psi.psi_null_floor), which is optimistic below about
+    a hundred rows."""
     if not baseline_floats or not live_floats or not edges:
         return psi(baseline_floats, live_floats, edges)
     n_buckets = len(edges) + 1  # interior bins plus the two overflow buckets
-    floor = psi_null_floor(len(baseline_floats), len(live_floats), n_buckets)
-    if floor.ceiling > clear_threshold:
+    ceiling = psi_null_ceiling_from_table(null_table, len(live_floats)) if null_table else None
+    if ceiling is not None:
+        source = f"simulated on the baseline at {len(live_floats)} live rows"
+    else:
+        floor = psi_null_floor(len(baseline_floats), len(live_floats), n_buckets)
+        ceiling = floor.ceiling
+        source = (
+            f"chi-square approximation, null mean {floor.mean:.3f} at "
+            f"{len(baseline_floats)} baseline vs {len(live_floats)} live rows, {n_buckets} buckets"
+        )
+    if ceiling > clear_threshold:
         return PSIResult(
             status=StatStatus.NOT_COMPUTABLE,
             value=None,
             not_computable_reason=(
-                f"PSI sampling-noise ceiling {floor.ceiling:.3f} (null mean "
-                f"{floor.mean:.3f} at {len(baseline_floats)} baseline vs "
-                f"{len(live_floats)} live rows, {n_buckets} buckets) exceeds the "
-                f"clear threshold {clear_threshold}; a quiet window could not "
-                f"reliably read as clear, so PSI is not gated on at this volume"
+                f"PSI sampling-noise ceiling {ceiling:.3f} ({source}) exceeds the clear "
+                f"threshold {clear_threshold}; a quiet window could not reliably read as "
+                f"clear, so PSI is not gated on at this volume"
             ),
         )
     return psi(baseline_floats, live_floats, edges)
+
+
+def _refused(reason: str, statistic: str, ceiling: float, source: str, clear: float) -> str:
+    return (
+        f"{statistic} sampling-noise ceiling {ceiling:.3f} ({source}) exceeds the clear "
+        f"threshold {clear}; a quiet window could not reliably read as clear, so {statistic} is "
+        f"not gated on at this volume{reason}"
+    )
+
+
+def _ks_or_below_floor(
+    baseline_floats: list[float], live_floats: list[float], clear_threshold: float
+) -> KSResult:
+    """KS D, unless Kolmogorov's null ceiling at these two sample sizes
+    exceeds the clear threshold (driftwatch.stats.floors.ks_null_ceiling).
+    Same reasoning as _psi_or_below_floor; D's null falls with the square
+    root of the sample size, so this bites only at a few dozen rows."""
+    if not baseline_floats or not live_floats:
+        return ks(baseline_floats, live_floats)
+    ceiling = ks_null_ceiling(len(baseline_floats), len(live_floats))
+    if ceiling > clear_threshold:
+        return KSResult(
+            status=StatStatus.NOT_COMPUTABLE,
+            statistic=None,
+            p_value=None,
+            not_computable_reason=_refused(
+                "",
+                "KS D",
+                ceiling,
+                f"Kolmogorov at {len(baseline_floats)} baseline vs {len(live_floats)} live rows",
+                clear_threshold,
+            ),
+        )
+    return ks(baseline_floats, live_floats)
+
+
+def _chi_square_or_below_floor(
+    baseline_strs: list[str], live_strs: list[str], categories: list[str], clear_threshold: float
+) -> ChiSquareResult:
+    """Cramer's V, unless its chi-square null ceiling for a 2 x k table at
+    these sample sizes exceeds the clear threshold
+    (driftwatch.stats.floors.cramers_v_null_ceiling). A fifteen-category
+    feature in a 600-row segment under a 0.07 clear threshold is the case
+    that motivated this: V read about 0.1 on pure noise there."""
+    if not baseline_strs or not live_strs:
+        return chi_square(baseline_strs, live_strs, categories)
+    n_categories = len(categories) + 1  # plus the "unseen" bucket
+    ceiling = cramers_v_null_ceiling(len(baseline_strs), len(live_strs), n_categories)
+    if ceiling > clear_threshold:
+        return ChiSquareResult(
+            status=StatStatus.NOT_COMPUTABLE,
+            statistic=None,
+            p_value=None,
+            cramers_v=None,
+            not_computable_reason=_refused(
+                "",
+                "Cramer's V",
+                ceiling,
+                f"chi-square with {n_categories - 1} degrees of freedom at "
+                f"{len(baseline_strs)} baseline vs {len(live_strs)} live rows",
+                clear_threshold,
+            ),
+        )
+    return chi_square(baseline_strs, live_strs, categories)
+
+
+def _jsd_or_below_floor(
+    baseline_scores: list[float],
+    live_scores: list[float],
+    edges: list[float],
+    clear_threshold: float,
+    null_table: dict[str, list[float]] | None = None,
+) -> JSDResult:
+    """Prediction-score JSD, unless its null ceiling at these sample sizes
+    exceeds the clear threshold: from the baseline's simulated table when
+    it carries one, else driftwatch.stats.floors.jsd_null_ceiling."""
+    if not baseline_scores or not live_scores or not edges:
+        return jsd(baseline_scores, live_scores, edges)
+    ceiling = psi_null_ceiling_from_table(null_table, len(live_scores)) if null_table else None
+    if ceiling is not None:
+        source = f"simulated on the baseline at {len(live_scores)} live rows"
+    else:
+        ceiling = jsd_null_ceiling(len(baseline_scores), len(live_scores), len(edges) + 1)
+        source = (
+            f"chi-square approximation at {len(baseline_scores)} baseline vs "
+            f"{len(live_scores)} live rows, {len(edges) + 1} buckets"
+        )
+    if ceiling > clear_threshold:
+        return JSDResult(
+            status=StatStatus.NOT_COMPUTABLE,
+            value=None,
+            not_computable_reason=_refused("", "JSD", ceiling, source, clear_threshold),
+        )
+    return jsd(baseline_scores, live_scores, edges)
 
 
 def _evaluate_prediction_score(
@@ -396,7 +520,13 @@ def _evaluate_prediction_score(
     ]
     live_scores = [p.prediction_score for p in predictions if p.prediction_score is not None]
 
-    jsd_result = jsd(baseline_scores, live_scores, edges)
+    jsd_result = _jsd_or_below_floor(
+        baseline_scores,
+        live_scores,
+        edges,
+        profile.drift_tests.prediction_score.jsd_clear_threshold,
+        prediction_score_null_floor_table(binning, segment_dimension, segment_value),
+    )
     return [
         _make_drift_result(
             window,

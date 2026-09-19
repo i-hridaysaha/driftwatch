@@ -87,32 +87,46 @@ def _alert_payload(alert: Alert, event: AlertEvent) -> dict[str, Any]:
     }
 
 
+MAX_NOTIFICATION_ATTEMPTS = 5
+"""Delivery rounds a single status transition gets before it is given up
+on. Each round is one scheduler tick apart (driftwatch.scheduler.jobs
+.retry_pending_notifications), so at the default five-minute tick a webhook
+outage of up to about twenty-five minutes still delivers the transition."""
+
+
 def notify_if_needed(alert: Alert, channels: list[NotificationChannel]) -> bool:
     """Re-notification policy: notify only on a STATUS TRANSITION (opened,
     escalated, resolved), never on steady-state continuation of an
     already-notified status -- a still-open alert does not re-notify on
-    every scheduler tick just because its last_seen advanced. Idempotent:
-    calling this repeatedly with an unchanged status is a no-op after the
-    first call for that status. Returns True if a notification round was
-    attempted for a real transition.
+    every scheduler tick just because its last_seen advanced. Idempotent
+    once a round succeeds: calling this again with an unchanged status is a
+    no-op. Returns True if a delivery round was attempted for a real
+    transition.
 
     A channel raising (a hanging or erroring webhook is an expected
     operational condition) must never fail the evaluation run this is
     called from, nor roll back the alert row's transition it's attached to
     -- so every channel is called in isolation, and a failure is caught,
-    logged, and recorded on the alert (last_notification_error) rather than
-    propagated. There is no automatic retry: a failed delivery is not
-    retried on the next touch of an already-notified status, matching this
-    function's steady-state no-renotify policy above; a persistently
-    failing channel is an operational concern for logs/last_notification_error
-    to surface, not something this function queues and resends."""
+    logged, and recorded on the alert (last_notification_error).
+
+    Retry is bounded and lives in the row, not in a queue: a round in which
+    any channel failed leaves last_notified_status behind the real status
+    and counts one attempt, so the next scheduler tick tries the whole
+    round again (every channel, so a log line can repeat; the webhook is
+    the one that matters), up to MAX_NOTIFICATION_ATTEMPTS. After that the
+    status is marked delivered with the error left on the row, so a dead
+    webhook cannot make the alert table grow an unbounded backlog. An
+    earlier version recorded the failure once and never retried; an alert
+    that opened during a webhook outage then reached nobody, ever."""
     if alert.last_notified_status == alert.status:
         return False
     event = _STATUS_TO_EVENT[alert.status]
+    failed = False
     for channel in channels:
         try:
             channel.notify(alert, event)
         except Exception as exc:
+            failed = True
             logger.exception(
                 "notification channel %s failed to deliver alert %d event %s",
                 type(channel).__name__,
@@ -121,6 +135,18 @@ def notify_if_needed(alert: Alert, channels: list[NotificationChannel]) -> bool:
             )
             alert.last_notification_error = f"{type(channel).__name__}: {exc}"
             alert.last_notification_error_at = datetime.now(UTC)
+    if failed:
+        alert.notification_attempts += 1
+        if alert.notification_attempts < MAX_NOTIFICATION_ATTEMPTS:
+            return True  # status stays undelivered; the scheduler retries next tick
+        logger.error(
+            "giving up on alert %d event %s after %d attempts",
+            alert.id,
+            event,
+            alert.notification_attempts,
+        )
+    else:
+        alert.notification_attempts = 0
     alert.last_notified_status = alert.status
     alert.last_notified_at = datetime.now(UTC)
     return True

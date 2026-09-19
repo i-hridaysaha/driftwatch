@@ -4,7 +4,15 @@ import numpy as np
 import pytest
 
 from driftwatch.stats.binning import compute_continuous_edges
-from driftwatch.stats.psi import EPSILON, psi, psi_null_floor
+from driftwatch.stats.psi import (
+    EPSILON,
+    _bucket_proportions_array,
+    _psi_from_proportions,
+    psi,
+    psi_null_ceiling_from_table,
+    psi_null_floor,
+    simulate_psi_null,
+)
 from driftwatch.stats.result import StatStatus
 
 EDGES = [1.0, 2.0, 3.0]  # 2 interior bins -> 4 buckets: under, (1,2], (2,3], over
@@ -149,3 +157,46 @@ def test_null_floor_shrinks_with_volume_and_is_infinite_for_empty_samples() -> N
     assert large.ceiling < 0.15  # the volume the segment scenario ships at
     assert math.isinf(psi_null_floor(0, 75, 12).ceiling)
     assert math.isinf(psi_null_floor(225, 75, 1).ceiling)
+
+
+def test_vectorised_null_simulation_uses_the_same_psi_as_psi() -> None:
+    """The simulation's bucketing and formula must be bit-for-bit psi()'s,
+    or the table would guard a different statistic than the one gated on."""
+    rng = np.random.default_rng(3)
+    base = rng.normal(40, 12, 225)
+    live = rng.normal(40, 12, 75)
+    edges = compute_continuous_edges(base.tolist())
+    slow = psi(base.tolist(), live.tolist(), edges).value
+    fast = _psi_from_proportions(
+        _bucket_proportions_array(base, edges), _bucket_proportions_array(live, edges)
+    )
+    assert slow == pytest.approx(fast, abs=1e-12)
+
+
+def test_simulated_null_is_heavier_than_the_approximation_at_small_sizes() -> None:
+    """The chi-square approximation is optimistic below about a hundred rows,
+    where empty bins hit the epsilon floor; the simulation sees that. At
+    the case study's original segment geometry the two are close; at thirty
+    rows the simulation is far above."""
+    rng = np.random.default_rng(0)
+    base = rng.normal(40, 12, 225).tolist()
+    edges = compute_continuous_edges(base)
+    table = simulate_psi_null(base, edges, live_sizes=(30, 75, 300), draws=150)
+    at_30 = psi_null_ceiling_from_table(table, 30)
+    at_75 = psi_null_ceiling_from_table(table, 75)
+    at_300 = psi_null_ceiling_from_table(table, 300)
+    assert at_30 is not None and at_75 is not None and at_300 is not None
+    assert at_30 > at_75 > at_300
+    assert at_30 > 2 * psi_null_floor(225, 30, 12).ceiling * 0.8
+    assert at_75 == pytest.approx(psi_null_floor(225, 75, 12).ceiling, rel=0.35)
+
+
+def test_ceiling_lookup_interpolates_in_log_size_and_clamps_at_the_ends() -> None:
+    table = {"sizes": [10.0, 100.0, 1000.0], "mean": [0.0, 0.0, 0.0], "ceiling": [1.0, 0.5, 0.1]}
+    assert psi_null_ceiling_from_table(table, 5) == 1.0
+    assert psi_null_ceiling_from_table(table, 10) == 1.0
+    assert psi_null_ceiling_from_table(table, 1000) == 0.1
+    assert psi_null_ceiling_from_table(table, 5000) == 0.1
+    mid = psi_null_ceiling_from_table(table, 316)  # halfway between 100 and 1000 in log space
+    assert mid == pytest.approx(0.3, abs=0.01)
+    assert psi_null_ceiling_from_table({"sizes": [], "mean": [], "ceiling": []}, 50) is None

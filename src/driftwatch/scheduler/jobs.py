@@ -1,10 +1,12 @@
 import logging
 from datetime import UTC, datetime
+from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.orm import Session
 
 from driftwatch.alerting.notifications import (
+    MAX_NOTIFICATION_ATTEMPTS,
     NotificationChannel,
     default_channels,
     notify_if_needed,
@@ -13,6 +15,7 @@ from driftwatch.config.loader import load_model_config, load_profile
 from driftwatch.db.models import Alert, EvaluationWindow, Model, Prediction
 from driftwatch.durations import parse_duration
 from driftwatch.evaluation.drift import evaluate_window
+from driftwatch.evaluation.performance import recompute_performance_for_window
 from driftwatch.scheduler.windowing import compute_window_boundaries, is_drift_watermark_elapsed
 
 logger = logging.getLogger(__name__)
@@ -86,8 +89,8 @@ def evaluate_pending_windows(session: Session, as_of: datetime | None = None) ->
     not the whole run's progress. Returns the number of windows evaluated.
 
     This is only half of performance's story: ongoing performance revision
-    as labels backfill happens separately, triggered directly by the label
-    ingestion endpoint (see driftwatch.api.routes.labels), independent of
+    as labels backfill is recompute_stale_windows below, driven by the
+    performance_stale flag the label ingestion endpoint sets, independent of
     this job and unaffected by whether a window's drift has already run."""
     as_of = as_of or datetime.now(UTC)
     model_ids = session.scalars(select(Model.model_id).where(Model.is_active.is_(True))).all()
@@ -119,6 +122,62 @@ def evaluate_pending_windows(session: Session, as_of: datetime | None = None) ->
             session.commit()
 
     return evaluated_count
+
+
+def recompute_stale_windows(session: Session, channels: list[NotificationChannel]) -> int:
+    """The other half of performance: every window label ingestion has
+    flagged since the last tick gets its performance recomputed, its
+    performance alerts re-evaluated, and any transition notified -- here,
+    in the scheduler process, never in the request that carried the labels.
+
+    Claiming is an UPDATE ... WHERE performance_stale, so the row lock makes
+    it exclusive and a batch that lands during the recompute simply sets the
+    flag again for the next tick. Commits per window, like
+    evaluate_pending_windows, so a failure loses one window, not the batch.
+    Returns the number of windows recomputed."""
+    stale_ids = session.scalars(
+        select(EvaluationWindow.id)
+        .where(EvaluationWindow.performance_stale.is_(True))
+        .order_by(EvaluationWindow.id)
+    ).all()
+    recomputed = 0
+    for window_id in stale_ids:
+        claim = session.execute(
+            update(EvaluationWindow)
+            .where(EvaluationWindow.id == window_id, EvaluationWindow.performance_stale.is_(True))
+            .values(performance_stale=False)
+        )
+        if not cast(CursorResult[Any], claim).rowcount:
+            continue  # another scheduler took it, or it was already cleared
+        try:
+            recompute_performance_for_window(session, window_id)
+        except Exception:
+            session.rollback()  # the claim rolls back too, so it is retried next tick
+            logger.exception("failed to recompute performance for window %s", window_id)
+            continue
+        recomputed += 1
+        _notify_touched_alerts(session, window_id, channels)
+        session.commit()
+    return recomputed
+
+
+def retry_pending_notifications(session: Session, channels: list[NotificationChannel]) -> int:
+    """Alerts whose last delivered status is behind their real status and
+    that have not exhausted MAX_NOTIFICATION_ATTEMPTS get another delivery
+    round. A transition whose webhook was down when it happened is therefore
+    delivered once the webhook is back, on a later tick, rather than logged
+    once and forgotten. Returns the number of alerts retried."""
+    pending = session.scalars(
+        select(Alert).where(
+            Alert.last_notified_status.is_distinct_from(Alert.status),
+            Alert.notification_attempts < MAX_NOTIFICATION_ATTEMPTS,
+        )
+    ).all()
+    for alert in pending:
+        notify_if_needed(alert, channels)
+    if pending:
+        session.commit()
+    return len(pending)
 
 
 def _notify_touched_alerts(

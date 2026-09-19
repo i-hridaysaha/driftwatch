@@ -10,9 +10,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.orm import Session
 
+from driftwatch.alerting.notifications import default_channels
 from driftwatch.cli import evaluate_range
 from driftwatch.config.loader import load_model_config, load_profile
 from driftwatch.db.models import (
@@ -34,8 +35,8 @@ from driftwatch.demo.loader import load_scenario
 from driftwatch.demo.modelconfig import write_model_config_yaml
 from driftwatch.demo.schema import ScenarioConfig
 from driftwatch.durations import parse_duration
-from driftwatch.evaluation.performance import recompute_performance_for_window
 from driftwatch.hashing import compute_payload_hash
+from driftwatch.scheduler.jobs import recompute_stale_windows
 from driftwatch.scheduler.windowing import EPOCH
 from driftwatch.stats.binning import compute_baseline_binning
 
@@ -82,7 +83,9 @@ def _register_baseline(session: Session, scenario: ScenarioConfig, data: Scenari
     model_config = load_model_config(scenario.model_id)
     features = [r.features for r in data.baseline_records]
     scores = [r.prediction_score for r in data.baseline_records]
-    binning = compute_baseline_binning(features, scores, model_config.schema_)
+    binning = compute_baseline_binning(
+        features, scores, model_config.schema_, segment_dimensions=model_config.segments.dimensions
+    )
 
     baseline = Baseline(model_id=scenario.model_id, is_active=True, binning_config=binning)
     session.add(baseline)
@@ -169,12 +172,13 @@ def _recompute_touched_windows(
     predicted_at_by_id: dict[str, datetime],
 ) -> None:
     """Mirrors exactly what driftwatch.api.routes.labels.ingest_labels does
-    for late-arriving labels -- find every EvaluationWindow touched by this
-    batch and recompute its performance once each -- just without the HTTP
-    layer, since this is inserting thousands of labels at once, not one
-    ingestion request at a time. Window lookup is index arithmetic against
-    the same epoch-aligned boundaries the real windows use, not a query
-    per label."""
+    for late-arriving labels -- flag every EvaluationWindow touched by this
+    batch as performance_stale -- and then what the scheduler's next tick
+    does: claim and recompute each flagged window once, via the same
+    recompute_stale_windows the scheduler runs. No HTTP layer, since this
+    is inserting thousands of labels at once, not one ingestion request at
+    a time. Window lookup is index arithmetic against the same epoch-aligned
+    boundaries the real windows use, not a query per label."""
     window_duration = parse_duration(scenario.window)
     windows_by_start = {
         w.window_start: w.id
@@ -190,9 +194,14 @@ def _recompute_touched_windows(
         if window_id is not None:
             touched_window_ids.add(window_id)
 
-    for window_id in sorted(touched_window_ids):
-        recompute_performance_for_window(session, window_id)
+    if touched_window_ids:
+        session.execute(
+            update(EvaluationWindow)
+            .where(EvaluationWindow.id.in_(touched_window_ids))
+            .values(performance_stale=True)
+        )
     session.commit()
+    recompute_stale_windows(session, default_channels())
 
 
 def _check_window_matches_profile(scenario: ScenarioConfig) -> None:
@@ -217,8 +226,16 @@ def _check_window_matches_profile(scenario: ScenarioConfig) -> None:
         )
 
 
-def build_scenario(scenario_name: str, *, reset: bool = True) -> BuildSummary:
+def build_scenario(
+    scenario_name: str, *, reset: bool = True, seed: int | None = None
+) -> BuildSummary:
+    """Generate, load and evaluate one scenario. `seed` overrides the
+    scenario's own seed so CI can verify every scenario's claims at more
+    than the one seed it ships with; nothing else about the scenario
+    changes, so the verifier's checks apply unchanged."""
     scenario = load_scenario(scenario_name)
+    if seed is not None:
+        scenario = scenario.model_copy(update={"seed": seed})
     _check_window_matches_profile(scenario)
     data = generate_scenario_data(scenario)
 
