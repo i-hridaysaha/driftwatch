@@ -11,4 +11,3 @@ build/
 .coverage
 htmlcov/
 .DS_Store
-.claude/
