@@ -269,7 +269,7 @@ footer{padding-block:28px 48px;font-size:14px;color:var(--mute);display:flex;fle
   </div>
   <details class="arch">
     <summary><span>Full architecture diagram (from the case study)</span></summary>
-    <div class="body"><img src="figures/03_architecture.png" alt="System architecture: predictions, labels and baseline registrations enter through one FastAPI endpoint into an append-only Postgres store; a scheduler drives the drift path and label ingestion drives the performance path; both feed an alert state machine; results and alert rows are written back; notifications leave on status transitions; a read-only dashboard reads the store directly." loading="lazy"></div>
+    <div class="body"><img src="figures/03_architecture.png" alt="System architecture: predictions, labels and baseline registrations enter through one FastAPI endpoint into an append-only Postgres store; a scheduler drives both evaluation paths from the store, sealing drift once at the watermark and recomputing performance for every window a label batch has flagged; both feed an alert state machine; results and alert rows are written back; notifications leave on status transitions; a read-only dashboard reads the store directly." loading="lazy"></div>
   </details>
 </section>
 

@@ -5,10 +5,11 @@
 Every plotted number is computed here from the pure scenario generator and
 the repository's own statistics (`driftwatch.demo.generator`,
 `driftwatch.stats`), the same code the evaluation pipeline runs, so the
-segment chart is the scenario's actual per-window trace and not a drawing
-of it. The three performance numbers on the metrics card come from the
-database (`driftwatch demo-verify concept_drift`); they are pinned below
-with their provenance and are the only typed numbers in this file. The
+segment, alert and performance charts are the scenarios' actual per-window
+traces and not drawings of them. The three performance numbers the metrics
+card quotes are recomputed the same way and checked, at render time,
+against the values `driftwatch demo-verify concept_drift` reported from the
+database; those pinned values are the only typed numbers in this file. The
 test count is read from `pytest --collect-only` at render time.
 
 Written with the portfolio's figure kit (`theme.py`, copied from
@@ -36,9 +37,11 @@ from theme import (  # noqa: E402
     BLUE_E,
     BLUE_T,
     BORDER_D,
+    C_GRAY,
     CARD,
     GREEN,
     GREEN_E,
+    GREEN_SOFT,
     GREEN_T,
     HERO_ASPECT,
     INK,
@@ -47,6 +50,7 @@ from theme import (  # noqa: E402
     RED,
     SAND_E,
     SAND_T,
+    SURFACE,
     VOLT,
     VOLT_DEEP,
     VOLT_EDGE,
@@ -70,8 +74,10 @@ from theme import (  # noqa: E402
     use_theme,
 )
 
+from driftwatch.config.loader import load_profile  # noqa: E402
 from driftwatch.demo.generator import generate_scenario_data  # noqa: E402
 from driftwatch.demo.loader import load_scenario  # noqa: E402
+from driftwatch.metrics.binary import pr_auc  # noqa: E402
 from driftwatch.stats.binning import compute_continuous_edges  # noqa: E402
 from driftwatch.stats.psi import psi  # noqa: E402
 
@@ -81,19 +87,29 @@ OUT = os.path.join(REPO, "figures")
 os.makedirs(OUT, exist_ok=True)
 
 KICKER = "ML MONITORING : DELAYED GROUND TRUTH"
-TAGLINE = "Two clocks, one model."
+TAGLINE = "Catch decay before a stakeholder does."
 BANNER_TAGLINE = "Separating data drift from performance decay, and alerting only on what persists"
 
 # ---- numbers that come from the database, pinned with their provenance ----
-# `driftwatch demo-verify concept_drift`, quoted verbatim in README.md:
+# `driftwatch demo-verify concept_drift`, quoted verbatim in README.md. The
+# concept trace below recomputes all three from the generator and refuses to
+# draw if they disagree, so the figures and the verifier can never drift apart.
 #   PR-AUC healthy before label_noise, degraded after: early_mean=0.874, late_mean=0.387
 #   degradation only visible after backfill: 60 windows initially not_computable
-PR_AUC_BEFORE, PR_AUC_AFTER, NOT_COMPUTABLE_WINDOWS = 0.874, 0.387, 60
+VERIFIED_PR_AUC_BEFORE, VERIFIED_PR_AUC_AFTER, VERIFIED_NOT_COMPUTABLE = 0.874, 0.387, 60
 # figures/_src/sweeps.py, `clean`: forty clean seeds at the shipped segment geometry
 CLEAN_SEEDS, CLEAN_SPURIOUS_OPENS = 40, 0
 # patient.yaml, the profile every shipped scenario runs under
-PSI_FIRE, PSI_CLEAR = 0.25, 0.15
-FIRE_PERSISTENCE, ESCALATE_PERSISTENCE, RESOLVE_PERSISTENCE = 3, 8, 5
+PROFILE = load_profile("patient")
+PSI_FIRE = PROFILE.drift_tests.continuous.psi_threshold
+PSI_CLEAR = PROFILE.drift_tests.continuous.psi_clear_threshold
+FIRE_PERSISTENCE = PROFILE.alerting.fire_persistence_windows
+ESCALATE_PERSISTENCE = PROFILE.alerting.escalate_persistence_windows
+RESOLVE_PERSISTENCE = PROFILE.alerting.resolve_persistence_windows
+MIN_LABELS = PROFILE.evaluation.min_window_size
+PR_AUC_SPEC = next(m for m in PROFILE.performance_metrics if m.name == "pr_auc")
+PR_AUC_FIRE, PR_AUC_CLEAR = PR_AUC_SPEC.fire_threshold, PR_AUC_SPEC.clear_threshold
+assert PR_AUC_FIRE is not None and PR_AUC_CLEAR is not None
 
 
 def P(name: str) -> str:
@@ -168,14 +184,35 @@ def segment_trace(feature: str = "age", segment: str = "APAC") -> SegmentTrace:
     )
 
 
-def lifecycle(values: list[float]) -> dict[str, int | None]:
+@dataclass(frozen=True)
+class Lifecycle:
+    opened: int | None
+    escalated: int | None
+    resolved: int | None
+    state: list[str]      # per window: quiet, counting, open, escalated, resolved
+    breach_run: list[int]  # consecutive breaching windows ending here
+
+
+def lifecycle(
+    values: list[float],
+    fire: float = PSI_FIRE,
+    clear: float = PSI_CLEAR,
+    direction: str = "above",
+) -> Lifecycle:
     """Where the patient profile's state machine opens, escalates and
-    resolves on this trace: the same streak rule the engine uses."""
+    resolves on this trace: the same three-way classification and streak
+    rule the engine uses (`alerting/streaks.py`). A value in the dead zone
+    between the two thresholds breaks whichever streak was building."""
     opened = escalated = resolved = None
     run_b = run_c = 0
     status = None
+    states: list[str] = []
+    runs: list[int] = []
     for i, v in enumerate(values):
-        kind = "B" if v >= PSI_FIRE else ("c" if v <= PSI_CLEAR else "d")
+        if direction == "above":
+            kind = "B" if v >= fire else ("c" if v <= clear else "d")
+        else:
+            kind = "B" if v <= fire else ("c" if v >= clear else "d")
         run_b = run_b + 1 if kind == "B" else 0
         run_c = run_c + 1 if kind == "c" else 0
         if status is None and run_b >= FIRE_PERSISTENCE:
@@ -184,7 +221,121 @@ def lifecycle(values: list[float]) -> dict[str, int | None]:
             status, escalated = "escalated", i
         elif status in ("open", "escalated") and run_c >= RESOLVE_PERSISTENCE:
             status, resolved = "resolved", i
-    return {"opened": opened, "escalated": escalated, "resolved": resolved}
+        if status is None:
+            states.append("counting" if run_b else "quiet")
+        else:
+            states.append(status)
+        runs.append(run_b)
+    return Lifecycle(opened, escalated, resolved, states, runs)
+
+
+# =====================================================================
+# the covariate scenario: one global feature, a one-window blip and then
+# a sustained shift, recomputed window by window from the generator
+# =====================================================================
+@dataclass(frozen=True)
+class CovariateTrace:
+    windows: list[int]
+    psi: list[float]
+    blip_windows: tuple[int, int]  # [start, end) of the one-window event
+    shift_start: int  # the sustained event runs to the end of the scenario
+    predictions_per_window: int
+
+
+def covariate_trace(feature: str = "age") -> CovariateTrace:
+    scenario = load_scenario("covariate_shift")
+    data = generate_scenario_data(scenario)
+    t0 = scenario.start_date
+    base = [
+        r.features[feature] for r in data.baseline_records if r.features.get(feature) is not None
+    ]
+    edges = compute_continuous_edges(base)
+    by_window: dict[int, list[float]] = defaultdict(list)
+    for p in data.predictions:
+        v = p.features.get(feature)
+        if v is None:
+            continue
+        by_window[int((p.predicted_at - t0).total_seconds() // 3600)].append(v)
+    windows = sorted(by_window)
+    values = [psi(base, by_window[w], edges).value or 0.0 for w in windows]
+    events = [e for e in scenario.events if e.feature == feature]
+    blip = next(e for e in events if e.duration_windows)
+    shift = next(e for e in events if not e.duration_windows)
+    return CovariateTrace(
+        windows=windows,
+        psi=values,
+        blip_windows=(blip.start_window, blip.start_window + blip.duration_windows),
+        shift_start=shift.start_window,
+        predictions_per_window=scenario.predictions_per_window,
+    )
+
+
+# =====================================================================
+# the concept scenario: PR-AUC per window once every label is in, and how
+# many labels each window held when it was first evaluated
+# =====================================================================
+@dataclass(frozen=True)
+class ConceptTrace:
+    windows: list[int]
+    pr_auc: list[float]  # the latest revision, every label present
+    labels_at_first: list[int]  # labels landed within early_cutoff_hours of prediction
+    predictions_per_window: int
+    early_cutoff_hours: float
+    event_start: int
+    flip_rate: tuple[float, float]  # label noise rate before and during the event
+    arrived_by: dict[int, float]  # share of all labels landed within h hours
+
+    @property
+    def before(self) -> float:
+        return float(np.mean(self.pr_auc[: self.event_start]))
+
+    @property
+    def after(self) -> float:
+        return float(np.mean(self.pr_auc[self.event_start :]))
+
+    @property
+    def not_computable_at_first(self) -> int:
+        return sum(1 for n in self.labels_at_first if n < MIN_LABELS)
+
+
+def concept_trace() -> ConceptTrace:
+    """`demo/build.py` first evaluates every window with only the labels
+    that landed within `early_cutoff_hours`, then inserts the rest and
+    recomputes: two revisions. This recomputes both from the generator."""
+    scenario = load_scenario("concept_drift")
+    data = generate_scenario_data(scenario)
+    t0 = scenario.start_date
+    cutoff = scenario.label_delay.early_cutoff_hours
+    label_by_id = {lab.prediction_id: lab for lab in data.labels}
+    y: dict[int, list[float]] = defaultdict(list)
+    score: dict[int, list[float]] = defaultdict(list)
+    early: dict[int, int] = defaultdict(int)
+    for p in data.predictions:
+        w = int((p.predicted_at - t0).total_seconds() // 3600)
+        lab = label_by_id[p.prediction_id]
+        y[w].append(lab.label_value)
+        score[w].append(p.prediction_score)
+        if lab.delay_hours <= cutoff:
+            early[w] += 1
+    windows = sorted(y)
+    event = next(e for e in scenario.events if e.shift_type == "label_noise")
+    base_rate = scenario.label_base_noise_rate
+    delays = np.array([lab.delay_hours for lab in data.labels])
+    trace = ConceptTrace(
+        windows=windows,
+        pr_auc=[pr_auc(y[w], score[w], {}) for w in windows],
+        labels_at_first=[early[w] for w in windows],
+        predictions_per_window=scenario.predictions_per_window,
+        early_cutoff_hours=cutoff,
+        event_start=event.start_window,
+        flip_rate=(base_rate, min(0.99, base_rate + event.magnitude)),
+        arrived_by={h: float(np.mean(delays <= h)) for h in (1, 6, 12, 24, 72)},
+    )
+    got = (round(trace.before, 3), round(trace.after, 3), trace.not_computable_at_first)
+    want = (VERIFIED_PR_AUC_BEFORE, VERIFIED_PR_AUC_AFTER, VERIFIED_NOT_COMPUTABLE)
+    if got != want:
+        raise SystemExit(f"concept_drift trace {got} disagrees with the verifier's {want}")
+    return trace
 
 
 # =====================================================================
@@ -305,44 +456,49 @@ def metrics_card(title, subtitle, tiles, headline=None, footnote=None,
 # =====================================================================
 # 03 ARCHITECTURE  (one store, two clocks, one engine; write-back on the
 #                   right rail, the dashboard's read on the left rail)
+#
+# The scheduler drives both paths (`scheduler/run.py`: one tick, three
+# jobs), so it sits between them and feeds each with its own arrow. Labels
+# reach the performance path through the store, as the `performance_stale`
+# flag label ingestion sets, never directly (`api/routes/labels.py`).
 # =====================================================================
 def architecture() -> None:
-    fig, ax = canvas(12.6, 14.4, bg=CARD)
+    fig, ax = canvas(12.6, 14.8, bg=CARD)
     Y = ax._Y
     title_block(ax, 4, Y - 5, "System architecture",
                 "one append-only store, two evaluation paths that close at different times, "
-                "one engine deciding what is worth saying", tsize=16)
+                "one state machine deciding what is worth saying", tsize=16)
 
     BL, BR = 6.0, 94.0          # band extent; the two rails run outside it
     XL, XR = BL + 5, BR - 5     # node extent inside a band
     LX, RX = 2.6, 97.4          # left rail (dashboard read), right rail (write-back)
     C_IN = "#3F5C86"; C_DRIFT = "#8A6A1F"; C_PERF = "#3E8047"; C_OUT = "#5C6B82"
 
-    def node(x, y, w, h, title, sub, fc=PAPER, ec=BORDER_D, ts=9.6, ss=7.2, lw=1.3):
+    def node(x, y, w, h, title, sub, fc=PAPER, ec=BORDER_D, ts=9.6, ss=7.8, lw=1.3):
+        # sublabels sit at 7.8 point or larger: at a 720-pixel column anything
+        # smaller renders near five pixels and stops reading
         rbox(ax, x, y, w, h, fc=fc, ec=ec, lw=lw, r=2.0, z=Z_NODE)
         ax.text(x + w / 2, y + h - 3.0, title, fontsize=ts, color=INK, fontweight="bold",
                 ha="center", va="center", zorder=Z_NODE_TEXT)
         if sub:
-            ax.text(x + w / 2, y + 2.9, sub, fontsize=ss, color=MUTE, ha="center",
+            ax.text(x + w / 2, y + 3.3, sub, fontsize=ss, color=MUTE, ha="center",
                     va="center", zorder=Z_NODE_TEXT, linespacing=1.25)
         return {"x": x, "y": y, "w": w, "h": h, "cx": x + w / 2, "cy": y + h / 2,
                 "top": y + h, "bot": y, "L": x, "R": x + w}
 
-    def band(y_bot, h, label, fc, ec, label_x=None):
+    def band(y_bot, h, label, fc, ec):
         rbox(ax, BL, y_bot, BR - BL, h, fc=fc, ec=ec, lw=1.3, r=3, z=Z_BAND)
-        # a band label never sits under an arrow, so a band with arrows
-        # entering near its left edge carries its label in the middle
-        ax.text(BL + 2.5 if label_x is None else label_x, y_bot + h - 2.8, label, fontsize=9.0,
-                color=INK, fontweight="bold", ha="left" if label_x is None else "center",
-                zorder=Z_BAND + 1)
+        # a band label never sits under an arrow
+        ax.text(BL + 2.5, y_bot + h - 2.8, label, fontsize=9.0, color=INK,
+                fontweight="bold", ha="left", zorder=Z_BAND + 1)
 
     def distribute(n, left, right, gap):
         w = (right - left - gap * (n - 1)) / n
         return [(left + i * (w + gap), w) for i in range(n)]
 
-    nh = 9.2
+    nh = 9.6
     gap_b = 5.4
-    h_in, h_hub, h_eval, h_alert, h_out = 25.5, 11.0, 16.0, 11.0, 16.0
+    h_in, h_hub, h_eval, h_alert, h_out = 28.0, 11.0, 16.4, 11.0, 16.4
     b_in = Y - 11.5 - h_in
     b_hub = b_in - gap_b - h_hub
     b_eval = b_hub - gap_b - h_eval
@@ -360,45 +516,57 @@ def architecture() -> None:
              "bin edges frozen once,\nreplaces the active baseline"),
     ]
     y_ing = b_in + 2.4
-    ing = node(XL, y_ing, XR - XL, nh - 1.6, "FastAPI ingest",
-               "schema failure refused with 422; duplicate skipped; late prediction "
-               "stored and counted; nothing accepted is ever rewritten", ss=7.0)
+    ing = node(XL, y_ing, XR - XL, nh, "FastAPI ingest",
+               "schema failure refused with 422; duplicate skipped; late prediction stored "
+               "and counted;\nnothing accepted is ever rewritten. A label batch flags the "
+               "windows it touches and recomputes nothing", ss=8.0)
     for k in srcs:
         arrow(ax, k["cx"], k["bot"], k["cx"], ing["top"], color=C_IN, lw=1.8, ms=13)
 
     # POSTGRES: the one emphasised block
     hub = node(XL - 2, b_hub, XR - XL + 4, h_hub, "POSTGRES : SINGLE SOURCE OF TRUTH",
-               "predictions, labels, baselines, drift and performance results, alert rows. "
+               "predictions, labels, baselines, drift and performance results, alert rows.\n"
                "Append-only, windowed by event time.",
-               fc=VOLT_SOFT, ec=VOLT_EDGE, ts=10.5, ss=7.4, lw=1.8)
-    arrow(ax, ing["cx"], b_in, ing["cx"], hub["top"], color=C_IN, lw=2.0, ms=15)
+               fc=VOLT_SOFT, ec=VOLT_EDGE, ts=10.5, ss=8.4, lw=1.8)
+    # the arrow starts on the node's edge, not on the band's
+    arrow(ax, ing["cx"], ing["bot"], ing["cx"], hub["top"], color=C_IN, lw=2.0, ms=15)
     alabel(ax, ing["cx"] + 1.2, (b_in + hub["top"]) / 2, "every accepted row, kept for good",
-           color=C_IN, size=7.2)
+           color=C_IN, size=8.0)
 
-    # EVALUATION: scheduler, drift path, performance path
-    band(b_eval, h_eval, "EVALUATION : TWO CLOCKS, THRESHOLDS AND PERSISTENCE FROM YAML PROFILES",
-         SAND_T, SAND_E, label_x=50)
+    # EVALUATION: the scheduler in the middle drives both paths. Two offset
+    # arrows from the store, one per clock, each with its own label; one
+    # arrow out to each path. Labels never reach the performance path
+    # directly: they land in the store and flag the windows they touch.
+    # the two arrows from the store enter this band at its centre, so the
+    # label sits at the left edge, over the drift path, where nothing enters
+    band(b_eval, h_eval, "EVALUATION : TWO CLOCKS, THRESHOLDS FROM YAML PROFILES",
+         SAND_T, SAND_E)
     y3 = b_eval + 2.4
     pos3 = distribute(3, XL, XR, 3.2)
-    sched = node(pos3[0][0], y3, pos3[0][1], nh, "scheduler",
-                 "one process, windows by event\ntime, closed past the watermark")
-    drift = node(pos3[1][0], y3, pos3[1][1], nh, "drift path",
+    drift = node(pos3[0][0], y3, pos3[0][1], nh, "drift path",
                  "computed once at the\nwatermark, then sealed")
+    sched = node(pos3[1][0], y3, pos3[1][1], nh, "scheduler",
+                 "one process, three jobs a tick:\nseal drift, recompute flagged\n"
+                 "performance, retry delivery")
     perf = node(pos3[2][0], y3, pos3[2][1], nh, "performance path",
-                "recomputed on every label\nbatch, no watermark")
-    arrow(ax, sched["cx"], hub["bot"], sched["cx"], sched["top"], color=C_DRIFT, lw=2.0, ms=15)
-    alabel(ax, sched["cx"] + 1.2, (hub["bot"] + sched["top"]) / 2,
-           "closed windows, predictions only", color=C_DRIFT, size=7.2)
-    arrow(ax, sched["R"], sched["cy"], drift["L"], drift["cy"], color=C_DRIFT, lw=2.0, ms=15)
-    arrow(ax, perf["cx"], hub["bot"], perf["cx"], perf["top"], color=C_PERF, lw=2.0, ms=15)
-    alabel(ax, perf["cx"] - 1.2, (hub["bot"] + perf["top"]) / 2,
-           "labels, whenever they land", color=C_PERF, size=7.2, ha="right")
+                "recomputed for every flagged\nwindow, no watermark")
+    dx = 3.6
+    arrow(ax, sched["cx"] - dx, hub["bot"], sched["cx"] - dx, sched["top"],
+          color=C_DRIFT, lw=2.0, ms=15)
+    alabel(ax, sched["cx"] - dx - 1.2, (hub["bot"] + sched["top"]) / 2,
+           "windows closed past the watermark", color=C_DRIFT, size=8.0, ha="right")
+    arrow(ax, sched["cx"] + dx, hub["bot"], sched["cx"] + dx, sched["top"],
+          color=C_PERF, lw=2.0, ms=15)
+    alabel(ax, sched["cx"] + dx + 1.2, (hub["bot"] + sched["top"]) / 2,
+           "windows a label batch flagged", color=C_PERF, size=8.0)
+    arrow(ax, sched["L"], sched["cy"], drift["R"], drift["cy"], color=C_DRIFT, lw=2.0, ms=15)
+    arrow(ax, sched["R"], sched["cy"], perf["L"], perf["cy"], color=C_PERF, lw=2.0, ms=15)
 
     # ALERT STATE MACHINE
     eng = node(XL - 2, b_alert, XR - XL + 4, h_alert, "ALERT STATE MACHINE",
                "persistence gates, hysteresis with a dead zone, recovery runs: "
-               "open, escalate, resolve. Evidence frozen at open and again at escalation.",
-               ts=10.0, ss=7.2)
+               "open, escalate, resolve.\nEvidence frozen at open and again at escalation.",
+               ts=10.0, ss=8.4)
     arrow(ax, drift["cx"], drift["bot"], drift["cx"], eng["top"], color=C_DRIFT, lw=2.0, ms=15)
     arrow(ax, perf["cx"], perf["bot"], perf["cx"], eng["top"], color=C_PERF, lw=2.0, ms=15)
 
@@ -407,7 +575,7 @@ def architecture() -> None:
     oarrow(ax, [(eng["R"], eng["cy"]), (RX, eng["cy"]), (RX, hub["cy"]), (hub["R"], hub["cy"])],
            color=C_OUT, lw=1.8, ms=14)
     alabel(ax, RX - 0.9, (b_eval + eng["top"]) / 2, "results and alerts\nwritten back",
-           color=C_OUT, size=6.8, ha="right")
+           color=C_OUT, size=7.8, ha="right")
 
     # OUTPUT: the dashboard reads the store, not the engine, so it sits on
     # the left where the read rail reaches it without crossing anything
@@ -422,14 +590,14 @@ def architecture() -> None:
     oarrow(ax, [(hub["L"], hub["cy"]), (LX, hub["cy"]), (LX, dash["cy"]), (dash["L"], dash["cy"])],
            color=C_OUT, lw=1.8, ms=14)
     alabel(ax, LX + 0.9, (b_eval + eng["top"]) / 2, "reads every table,\nwrites none",
-           color=C_OUT, size=6.8, ha="left")
+           color=C_OUT, size=7.8, ha="left")
     save(fig, P("03_architecture.png"))
 
 
 # =====================================================================
 # 04 TWO CLOCKS  (concept: one window, two lifecycles)
 # =====================================================================
-def two_clocks() -> None:
+def two_clocks(concept: ConceptTrace) -> None:
     fig, ax = canvas(12.4, 5.6, bg=CARD)
     Y = ax._Y
     title_block(ax, 4, Y - 4.4, "A window has two lifecycles",
@@ -478,7 +646,7 @@ def two_clocks() -> None:
         ax.text(tx, yp + 6.3, f"recompute {i + 1}", fontsize=7.4, color=GREEN, ha="center",
                 va="center", zorder=Z_LABEL)
     ax.text(x0, yp - 4.2,
-            f"{NOT_COMPUTABLE_WINDOWS} windows read not_computable until labels arrive, "
+            f"{concept.not_computable_at_first} windows read not_computable until labels arrive, "
             "shown as an explicit marker, never as a gap",
             fontsize=7.8, color=MUTE, style="italic", ha="left", va="center", zorder=Z_LABEL)
 
@@ -517,8 +685,9 @@ def segment_vs_global(trace: SegmentTrace) -> None:
     ax.text(w[0], PSI_FIRE + top * 0.015, "fire threshold 0.25", fontsize=7.8, color=INK,
             ha="left", va="bottom", zorder=Z_LABEL)
     ax.axhline(PSI_CLEAR, color=MUTE, lw=0.9, ls=(0, (1.5, 2.5)), zorder=Z_ARROW)
-    ax.text(w[0], PSI_CLEAR - top * 0.015, "clear threshold 0.15", fontsize=7.2, color=MUTE,
-            ha="left", va="top", zorder=Z_LABEL)
+    # at the right end both series sit under 0.07, so the label touches nothing
+    ax.text(w[-1], PSI_CLEAR - top * 0.015, "clear threshold 0.15", fontsize=7.2, color=MUTE,
+            ha="right", va="top", zorder=Z_LABEL)
 
     ax.plot(w, g, color="#4F86C6", lw=2.0, marker="o", ms=3.2, zorder=Z_NODE_TEXT,
             label="global, age feature")
@@ -530,15 +699,15 @@ def segment_vs_global(trace: SegmentTrace) -> None:
                 fontsize=10, color=VOLT_DEEP, fontweight="bold", ha="center",
                 arrowprops={"arrowstyle": "-|>", "color": VOLT_DEEP, "lw": 1.2}, zorder=Z_LABEL)
     i_g = int(np.argmax(g))
-    ax.annotate(f"{g[i_g]:.3f}, never fires", xy=(w[i_g], g[i_g]),
-                xytext=(w[i_g] - 9.5, g[i_g] + top * 0.22), fontsize=8.6, color="#2F5F9E",
-                ha="center", arrowprops={"arrowstyle": "-|>", "color": "#2F5F9E", "lw": 1.0},
-                zorder=Z_LABEL)
+    # no leader line: a leader from outside the band would cross the segment
+    # series on its way in. The label sits just above the global peak, under
+    # the clear threshold, where the segment line is a full unit higher.
+    ax.text(w[i_g] - 1, g[i_g] + top * 0.03, f"{g[i_g]:.3f}, never fires", fontsize=8.6,
+            color="#2F5F9E", ha="center", va="bottom", zorder=Z_LABEL)
 
     # the state machine on the segment line
     life = lifecycle(list(s))
-    marks = [("opens", life["opened"]), ("escalates", life["escalated"]),
-             ("resolves", life["resolved"])]
+    marks = [("opens", life.opened), ("escalates", life.escalated), ("resolves", life.resolved)]
     for label, idx in marks:
         if idx is None:
             continue
@@ -564,12 +733,222 @@ def segment_vs_global(trace: SegmentTrace) -> None:
              fontsize=9.5, color=MUTE, style="italic", ha="left", va="center")
     save(fig, P("05_segment_vs_global.png"))
 
+# =====================================================================
+# 06 ALERT LIFECYCLE  (the real per-window trace; under it, the state
+#                      machine's decision for every window)
+# =====================================================================
+ORDINAL = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth",
+           7: "seventh", 8: "eighth", 9: "ninth", 10: "tenth"}
+STATE_FILL = {"quiet": SURFACE, "counting": VOLT_SOFT, "open": VOLT_EDGE, "escalated": VOLT,
+              "resolved": GREEN_SOFT}
+STATE_NAME = {"quiet": "quiet", "counting": f"breach, counting to {FIRE_PERSISTENCE}",
+              "open": "open", "escalated": "escalated"}
+
+
+def alert_lifecycle(trace: CovariateTrace) -> None:
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch, Rectangle
+    from matplotlib.ticker import FixedFormatter, FixedLocator, NullFormatter
+
+    fig = plt.figure(figsize=(12.4, 6.8))
+    fig.patch.set_facecolor(CARD)
+    ax = fig.add_axes([0.075, 0.33, 0.9, 0.5])
+    sx = fig.add_axes([0.075, 0.175, 0.9, 0.085], sharex=ax)
+    for a in (ax, sx):
+        a.set_facecolor(CARD)
+        for side in ("top", "right"):
+            a.spines[side].set_visible(False)
+    w = np.array(trace.windows)
+    v = np.array(trace.psi)
+    life = lifecycle(list(v))
+    b0, b1 = trace.blip_windows
+    s0 = trace.shift_start
+    top = v.max() * 4.5
+    floor = v.min() * 0.4
+
+    # the two thresholds and the dead zone between them, on a log axis so
+    # the quiet windows, the thresholds and the shift all stay readable
+    ax.set_yscale("log")
+    ax.yaxis.set_major_locator(FixedLocator([0.01, 0.1, 1, 10]))
+    ax.yaxis.set_major_formatter(FixedFormatter(["0.01", "0.1", "1", "10"]))
+    ax.yaxis.set_minor_formatter(NullFormatter())
+    ax.axhspan(PSI_CLEAR, PSI_FIRE, color=SAND_T, zorder=Z_BAND)
+    ax.axhline(PSI_FIRE, color=INK, lw=1.2, ls=(0, (4, 3)), zorder=Z_ARROW)
+    ax.axhline(PSI_CLEAR, color=MUTE, lw=0.9, ls=(0, (1.5, 2.5)), zorder=Z_ARROW)
+    ax.text(w[0], PSI_FIRE * 1.12, f"fire threshold {PSI_FIRE}", fontsize=7.8, color=INK,
+            ha="left", va="bottom", zorder=Z_LABEL)
+    ax.text(w[0], PSI_CLEAR * 0.9, f"clear threshold {PSI_CLEAR}", fontsize=7.2, color=MUTE,
+            ha="left", va="top", zorder=Z_LABEL)
+    # the note sits in the sustained band, where the series runs far above it
+    ax.text((s0 + w[-1]) / 2 + 1, PSI_FIRE * 1.12, "the dead zone between them counts for "
+            "neither side and breaks any streak", fontsize=7.4, color=MUTE, style="italic",
+            ha="center", va="bottom", zorder=Z_LABEL)
+
+    # the two injected events
+    ax.axvspan(b0 - 0.5, b1 - 0.5, color=SAND_T, zorder=Z_BAND)
+    ax.axvspan(s0 - 0.5, w[-1] + 0.5, color=SAND_T, zorder=Z_BAND)
+    ax.text((s0 + w[-1]) / 2 + 1, floor * 1.35,
+            f"injected shift from window {s0}, sustained to the end", fontsize=7.6, color=MUTE,
+            style="italic", ha="center", va="bottom", zorder=Z_LABEL)
+
+    ax.plot(w, v, color="#4F86C6", lw=2.0, marker="o", ms=3.2, zorder=Z_NODE_TEXT,
+            label=f"global, age feature, {trace.predictions_per_window} rows a window")
+
+    # the blip: one window over the line, and the rule that keeps it quiet
+    i_b = int(np.argmax(v[b0:b1])) + b0
+    ax.annotate(f"one breaching window, {b1 - b0} of {FIRE_PERSISTENCE}:\nsuppressed, "
+                "never opens", xy=(w[i_b], v[i_b]), xytext=(w[i_b] - 9, v[i_b] * 0.55),
+                fontsize=8.4, color=INK, ha="right", va="center",
+                arrowprops={"arrowstyle": "-|>", "color": INK, "lw": 1.1}, zorder=Z_LABEL)
+
+    # the sustained shift: where the machine opens and escalates, with the
+    # reading it froze as evidence at each step
+    marks = [("opens", life.opened, FIRE_PERSISTENCE, "right", -1.2),
+             ("escalates", life.escalated, ESCALATE_PERSISTENCE, "left", 1.2)]
+    for label, idx, need, ha, dx in marks:
+        if idx is None:
+            continue
+        ax.plot([w[idx]], [v[idx]], marker="o", ms=8, mfc="none", mec=INK, mew=1.2,
+                zorder=Z_LABEL)
+        ax.text(w[idx] + dx, v[idx] * 2.4, f"{label} on the {ORDINAL[need]} breaching window\n"
+                f"evidence frozen at {v[idx]:.2f}", fontsize=7.8, color=INK, ha=ha,
+                va="bottom", zorder=Z_LABEL)
+
+    ax.set_xlim(w[0] - 0.5, w[-1] + 0.5)
+    ax.set_ylim(floor, top)
+    ax.set_ylabel("population stability index, log scale", fontsize=9, color=INK)
+    ax.tick_params(labelsize=8, labelbottom=False)
+    ax.grid(axis="y", color=BORDER_D, lw=0.5, alpha=0.5)
+    ax.legend(loc="upper left", frameon=False, fontsize=8.2)
+
+    # the state strip: one cell per window, the streak count written in
+    # while it is still deciding
+    for i, (state, run) in enumerate(zip(life.state, life.breach_run, strict=True)):
+        sx.add_patch(Rectangle((w[i] - 0.5, 0), 1, 1, fc=STATE_FILL[state], ec=CARD, lw=0.6,
+                               zorder=Z_NODE))
+        if 0 < run <= ESCALATE_PERSISTENCE:
+            sx.text(w[i], 0.5, str(run), fontsize=6.2, ha="center", va="center",
+                    color=PAPER if state == "escalated" else INK, zorder=Z_NODE_TEXT)
+    sx.set_ylim(0, 1)
+    sx.set_yticks([])
+    sx.spines["left"].set_visible(False)
+    sx.set_ylabel("alert\nstate", fontsize=8, color=INK, rotation=0, ha="right", va="center",
+                  labelpad=6)
+    sx.set_xlabel("evaluation window (one hour each)", fontsize=9, color=INK)
+    sx.tick_params(labelsize=8)
+    handles = [Patch(fc=STATE_FILL[k], ec=BORDER_D, lw=0.5, label=STATE_NAME[k])
+               for k in ("quiet", "counting", "open", "escalated")]
+    sx.legend(handles=handles, loc="upper left", bbox_to_anchor=(0, -0.95), ncol=4,
+              frameon=False, fontsize=7.8, handlelength=1.2, columnspacing=1.6)
+
+    fig.text(0.04, 0.95, "ALERTS YOU CAN TRUST", fontsize=15, color=INK, fontweight="bold",
+             ha="left", va="center")
+    fig.text(0.04, 0.905,
+             f"one breaching window never opens an alert under a {FIRE_PERSISTENCE}-window "
+             f"persistence rule; a sustained breach opens on its {ORDINAL[FIRE_PERSISTENCE]} "
+             f"window and escalates on its {ORDINAL[ESCALATE_PERSISTENCE]}, "
+             "with the evidence frozen at each step",
+             fontsize=9.5, color=MUTE, style="italic", ha="left", va="center")
+    save(fig, P("06_alert_lifecycle.png"))
+
+
+# =====================================================================
+# 07 PERFORMANCE BACKFILL  (the real per-window trace: what each window
+#                           held at first evaluation, and what it read
+#                           once every label was in)
+# =====================================================================
+def performance_backfill(trace: ConceptTrace) -> None:
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(12.4, 6.8))
+    fig.patch.set_facecolor(CARD)
+    ax = fig.add_axes([0.075, 0.38, 0.9, 0.45])
+    bx = fig.add_axes([0.075, 0.115, 0.9, 0.19], sharex=ax)
+    for a in (ax, bx):
+        a.set_facecolor(CARD)
+        for side in ("top", "right"):
+            a.spines[side].set_visible(False)
+    w = np.array(trace.windows)
+    v = np.array(trace.pr_auc)
+    n0 = np.array(trace.labels_at_first)
+    ev = trace.event_start
+    life = lifecycle(list(v), PR_AUC_FIRE, PR_AUC_CLEAR, direction="below")
+
+    # the latest revision: every label in
+    ax.axvspan(ev - 0.5, w[-1] + 0.5, color=SAND_T, zorder=Z_BAND)
+    ax.text((ev + w[-1]) / 2, 1.04, f"injected label noise from window {ev}: flip rate "
+            f"{trace.flip_rate[0]:.2f} to {trace.flip_rate[1]:.2f}", fontsize=7.6, color=MUTE,
+            style="italic", ha="center", va="top", zorder=Z_LABEL)
+    ax.axhline(PR_AUC_FIRE, color=INK, lw=1.2, ls=(0, (4, 3)), zorder=Z_ARROW)
+    ax.text(w[0], PR_AUC_FIRE - 0.015, f"fire threshold {PR_AUC_FIRE}, a breach is below it",
+            fontsize=7.8, color=INK, ha="left", va="top", zorder=Z_LABEL)
+    ax.axhline(PR_AUC_CLEAR, color=MUTE, lw=0.9, ls=(0, (1.5, 2.5)), zorder=Z_ARROW)
+    ax.text(w[0], PR_AUC_CLEAR + 0.015, f"clear threshold {PR_AUC_CLEAR}", fontsize=7.2,
+            color=MUTE, ha="left", va="bottom", zorder=Z_LABEL)
+    ax.plot(w, v, color=VOLT, lw=2.4, marker="o", ms=3.4, zorder=Z_NODE_TEXT + 1,
+            label="PR-AUC, latest revision, every label in")
+    for lo, hi, mean, y_txt, va in ((0, ev, trace.before, 0.97, "bottom"),
+                                    (ev, len(w), trace.after, 0.27, "top")):
+        ax.hlines(mean, w[lo] - 0.5, w[hi - 1] + 0.5, color=VOLT_DEEP, lw=1.0,
+                  ls=(0, (6, 3)), zorder=Z_ARROW)
+        ax.text((w[lo] + w[hi - 1]) / 2, y_txt, f"mean {mean:.3f} over windows {w[lo]} to "
+                f"{w[hi - 1]}", fontsize=8.6, color=VOLT_DEEP, fontweight="bold", ha="center",
+                va=va, zorder=Z_LABEL)
+    for label, idx in (("opens", life.opened), ("escalates", life.escalated)):
+        if idx is None:
+            continue
+        ax.plot([w[idx]], [v[idx]], marker="o", ms=8, mfc="none", mec=INK, mew=1.2,
+                zorder=Z_LABEL)
+        ax.text(w[idx], v[idx] + 0.045, label, fontsize=7.6, color=INK, ha="center",
+                va="bottom", zorder=Z_LABEL)
+    ax.set_xlim(w[0] - 0.5, w[-1] + 0.5)
+    ax.set_ylim(0, 1.08)
+    ax.set_ylabel("PR-AUC", fontsize=9, color=INK)
+    ax.tick_params(labelsize=8, labelbottom=False)
+    ax.grid(axis="y", color=BORDER_D, lw=0.5, alpha=0.5)
+    ax.legend(loc="lower left", frameon=False, fontsize=8.2)
+
+    # the initial revision: what each window held when it was first
+    # evaluated, against the minimum the pipeline will compute on
+    bx.bar(w, n0, width=0.8, color=C_GRAY, zorder=Z_NODE)
+    bx.axhline(MIN_LABELS, color=INK, lw=1.0, ls=(0, (1.5, 2.5)), zorder=Z_ARROW)
+    bx.text(w[-1], MIN_LABELS + MIN_LABELS * 0.06, f"minimum {MIN_LABELS} labeled rows "
+            "to compute", fontsize=7.4, color=INK, ha="right", va="bottom", zorder=Z_LABEL)
+    bx.text(w[0], MIN_LABELS * 1.28, f"labels present at first evaluation, within "
+            f"{trace.early_cutoff_hours:.0f} hour of prediction: about {n0.mean():.0f} of "
+            f"{trace.predictions_per_window} a window, so all {trace.not_computable_at_first} "
+            "windows read not_computable", fontsize=7.8, color=MUTE, style="italic",
+            ha="left", va="top", zorder=Z_LABEL)
+    bx.set_ylim(0, MIN_LABELS * 1.35)
+    bx.set_yticks([0, MIN_LABELS])
+    bx.set_ylabel("labels at first\nevaluation", fontsize=8, color=INK)
+    bx.set_xlabel("evaluation window (one hour each)", fontsize=9, color=INK)
+    bx.tick_params(labelsize=8)
+
+    fig.text(0.04, 0.95, "TIME YOU CAN'T RUSH", fontsize=15, color=INK, fontweight="bold",
+             ha="left", va="center")
+    fig.text(0.04, 0.905,
+             f"{trace.arrived_by[6] * 100:.0f} percent of a window's labels land within six "
+             f"hours of prediction and {trace.arrived_by[1] * 100:.1f} percent within the "
+             "first, so a window's first evaluation has almost nothing to score",
+             fontsize=9.5, color=MUTE, style="italic", ha="left", va="center")
+    fig.text(0.04, 0.877,
+             f"once the rest arrive, PR-AUC reads {trace.before:.3f} before the injected label "
+             f"noise and {trace.after:.3f} after",
+             fontsize=9.5, color=MUTE, style="italic", ha="left", va="center")
+    save(fig, P("07_performance_backfill.png"))
+
 
 if __name__ == "__main__":
     trace = segment_trace()
+    covariate = covariate_trace()
+    concept = concept_trace()
     n_tests, n_files = test_counts()
+    seg_life = lifecycle(trace.segment_psi)
     print(f"global max {max(trace.global_psi):.3f}, segment max {max(trace.segment_psi):.2f}, "
-          f"lifecycle {lifecycle(trace.segment_psi)}, tests {n_tests} in {n_files} files")
+          f"lifecycle {(seg_life.opened, seg_life.escalated, seg_life.resolved)}, "
+          f"PR-AUC {concept.before:.3f} to {concept.after:.3f}, "
+          f"tests {n_tests} in {n_files} files")
     hero()
     banner(trace, n_tests, n_files)
     metrics_card(
@@ -580,8 +959,10 @@ if __name__ == "__main__":
             (str(n_tests), f"tests across {n_files} files"),
             (f"{max(trace.global_psi):.3f} vs {max(trace.segment_psi):.2f}",
              "global against segment drift, same feature, same windows"),
-            (f"{PR_AUC_BEFORE} to {PR_AUC_AFTER}", "PR-AUC before and after injected label noise"),
-            (str(NOT_COMPUTABLE_WINDOWS), "windows correctly not computable before labels arrived"),
+            (f"{concept.before:.3f} to {concept.after:.3f}",
+             "PR-AUC before and after injected label noise"),
+            (str(concept.not_computable_at_first),
+             "windows correctly not computable before labels arrived"),
             ("Python, FastAPI, Postgres", "stack"),
         ],
         headline=2,
@@ -589,5 +970,7 @@ if __name__ == "__main__":
                  "pipeline behaves as claimed, not detection sensitivity on real traffic.",
     )
     architecture()
-    two_clocks()
+    two_clocks(concept)
     segment_vs_global(trace)
+    alert_lifecycle(covariate)
+    performance_backfill(concept)

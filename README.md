@@ -142,7 +142,7 @@ Cramér's V, which is how that floor got added).
 
 ## Approach
 
-![Predictions, labels and baseline registrations enter through one FastAPI endpoint into an append-only Postgres store. A scheduler drives the drift path, label ingestion drives the performance path, both feed an alert state machine, results and alert rows are written back to the store, notifications leave on status transitions, and a read-only dashboard reads the store directly.](figures/03_architecture.png)
+![Predictions, labels and baseline registrations enter through one FastAPI endpoint into an append-only Postgres store. A scheduler drives both evaluation paths from the store: the drift path seals each window once at its watermark, and the performance path recomputes every window a label batch has flagged. Both feed an alert state machine, results and alert rows are written back to the store, notifications leave on status transitions, and a read-only dashboard reads the store directly.](figures/03_architecture.png)
 
 Per-model behaviour — feature schema, drift thresholds, segments, alert
 sensitivity — comes entirely from YAML config, never from branching code. The
